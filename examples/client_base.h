@@ -173,11 +173,22 @@ struct Config {
   // preference.  Client uses this field to select a version from the
   // version set offered in Version Negotiation packet.
   std::vector<uint32_t> preferred_versions;
-  // other_versions includes QUIC versions that are sent in
-  // other_versions field of version_information transport_parameter.
-  std::vector<uint32_t> other_versions;
+  // available_versions includes QUIC versions that are sent in
+  // available_versions field of version_information
+  // transport_parameter.
+  std::vector<uint32_t> available_versions;
   // no_pmtud disables Path MTU Discovery.
   bool no_pmtud;
+  // ack_thresh is the minimum number of the received ACK eliciting
+  // packets that triggers immediate acknowledgement.
+  size_t ack_thresh;
+  // wait_for_ticket, if true, waits for a ticket to be received
+  // before exiting on exit_on_first_stream_close or
+  // exit_on_all_streams_close.
+  bool wait_for_ticket;
+  // initial_pkt_num is the initial packet number for each packet
+  // number space.  If it is set to UINT32_MAX, it is chosen randomly.
+  uint32_t initial_pkt_num;
 };
 
 class ClientBase {
@@ -195,12 +206,15 @@ public:
 
   ngtcp2_crypto_conn_ref *conn_ref();
 
+  void ticket_received();
+
 protected:
   ngtcp2_crypto_conn_ref conn_ref_;
   TLSClientSession tls_session_;
   FILE *qlog_;
   ngtcp2_conn *conn_;
-  ngtcp2_connection_close_error last_error_;
+  ngtcp2_ccerr last_error_;
+  bool ticket_received_;
 };
 
 void qlog_write_cb(void *user_data, uint32_t flags, const void *data,

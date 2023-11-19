@@ -41,41 +41,48 @@
 #include <ngtcp2/ngtcp2.h>
 #include <nghttp3/nghttp3.h>
 
-#include <ev.h>
-
 namespace ngtcp2 {
 
 namespace util {
 
-template <typename T, size_t N1, size_t N2>
-constexpr nghttp3_nv make_nv(const T (&name)[N1], const T (&value)[N2]) {
-  return nghttp3_nv{(uint8_t *)name, (uint8_t *)value, N1 - 1, N2 - 1,
-                    NGHTTP3_NV_FLAG_NONE};
+inline nghttp3_nv make_nv(const std::string_view &name,
+                          const std::string_view &value, uint8_t flags) {
+  return nghttp3_nv{
+      reinterpret_cast<uint8_t *>(const_cast<char *>(std::data(name))),
+      reinterpret_cast<uint8_t *>(const_cast<char *>(std::data(value))),
+      name.size(),
+      value.size(),
+      flags,
+  };
 }
 
-template <typename T, size_t N, typename S>
-constexpr nghttp3_nv make_nv(const T (&name)[N], const S &value) {
-  return nghttp3_nv{(uint8_t *)name, (uint8_t *)value.data(), N - 1,
-                    value.size(), NGHTTP3_NV_FLAG_NONE};
+inline nghttp3_nv make_nv_cc(const std::string_view &name,
+                             const std::string_view &value) {
+  return make_nv(name, value, NGHTTP3_NV_FLAG_NONE);
 }
 
-template <typename S1, typename S2>
-constexpr nghttp3_nv make_nv(const S1 &name, const S2 &value) {
-  return nghttp3_nv{(uint8_t *)name.data(), (uint8_t *)value.data(),
-                    name.size(), value.size(), NGHTTP3_NV_FLAG_NONE};
+inline nghttp3_nv make_nv_nc(const std::string_view &name,
+                             const std::string_view &value) {
+  return make_nv(name, value, NGHTTP3_NV_FLAG_NO_COPY_NAME);
+}
+
+inline nghttp3_nv make_nv_nn(const std::string_view &name,
+                             const std::string_view &value) {
+  return make_nv(name, value,
+                 NGHTTP3_NV_FLAG_NO_COPY_NAME | NGHTTP3_NV_FLAG_NO_COPY_VALUE);
 }
 
 std::string format_hex(uint8_t c);
 
 std::string format_hex(const uint8_t *s, size_t len);
 
-std::string format_hex(const std::string &s);
+std::string format_hex(const std::string_view &s);
 
 template <size_t N> std::string format_hex(const uint8_t (&s)[N]) {
   return format_hex(s, N);
 }
 
-std::string decode_hex(const std::string &s);
+std::string decode_hex(const std::string_view &s);
 
 // format_durationf formats |ns| in human readable manner.  |ns| must
 // be nanoseconds resolution.  This function uses the largest unit so
@@ -86,7 +93,7 @@ std::string format_durationf(uint64_t ns);
 
 std::mt19937 make_mt19937();
 
-ngtcp2_tstamp timestamp(struct ev_loop *loop);
+ngtcp2_tstamp timestamp();
 
 bool numeric_host(const char *hostname);
 
@@ -136,11 +143,6 @@ bool istarts_with(InputIterator1 first1, InputIterator1 last1,
 
 template <typename S, typename T> bool istarts_with(const S &a, const T &b) {
   return istarts_with(a.begin(), a.end(), b.begin(), b.end());
-}
-
-template <typename T, typename CharT, size_t N>
-bool istarts_with_l(const T &a, const CharT (&b)[N]) {
-  return istarts_with(a.begin(), a.end(), b, b + N - 1);
 }
 
 // make_cid_key returns the key for |cid|.
@@ -213,15 +215,13 @@ read_mime_types(const std::string_view &filename);
 
 // format_uint converts |n| into string.
 template <typename T> std::string format_uint(T n) {
-  std::string res;
   if (n == 0) {
-    res = "0";
-    return res;
+    return "0";
   }
   size_t nlen = 0;
   for (auto t = n; t; t /= 10, ++nlen)
     ;
-  res.resize(nlen);
+  std::string res(nlen, '\0');
   for (; n; n /= 10) {
     res[--nlen] = (n % 10) + '0';
   }
@@ -279,7 +279,7 @@ int generate_secret(uint8_t *secret, size_t secretlen);
 // normalize_path removes ".." by consuming a previous path component.
 // It also removes ".".  It assumes that |path| starts with "/".  If
 // it cannot consume a previous path component, it just removes "..".
-std::string normalize_path(const std::string &path);
+std::string normalize_path(const std::string_view &path);
 
 constexpr bool is_digit(const char c) { return '0' <= c && c <= '9'; }
 
@@ -334,6 +334,11 @@ std::optional<std::string> read_token(const std::string_view &filename);
 int write_token(const std::string_view &filename, const uint8_t *token,
                 size_t tokenlen);
 
+std::optional<std::string>
+read_transport_params(const std::string_view &filename);
+int write_transport_params(const std::string_view &filename,
+                           const uint8_t *data, size_t datalen);
+
 const char *crypto_default_ciphers();
 
 const char *crypto_default_groups();
@@ -341,7 +346,8 @@ const char *crypto_default_groups();
 // split_str parses delimited strings in |s| and returns substrings
 // delimited by |delim|.  The any white spaces around substring are
 // treated as a part of substring.
-std::vector<std::string> split_str(const std::string &s, char delim = ',');
+std::vector<std::string_view> split_str(const std::string_view &s,
+                                        char delim = ',');
 
 // parse_version parses |s| to get 4 byte QUIC version.  |s| must be a
 // hex string and must start with "0x" (.e.g, 0x00000001).

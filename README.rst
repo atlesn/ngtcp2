@@ -30,9 +30,9 @@ Requirements
 ------------
 
 The libngtcp2 C library itself does not depend on any external
-libraries.  The example client, and server are written in C++17, and
-should compile with the modern C++ compilers (e.g., clang >= 8.0, or
-gcc >= 8.0).
+libraries.  The example client, and server are written in C++20, and
+should compile with the modern C++ compilers (e.g., clang >= 11.0, or
+gcc >= 11.0).
 
 The following packages are required to configure the build system:
 
@@ -55,18 +55,19 @@ required:
 ngtcp2 crypto helper library, and client and server under examples
 directory require at least one of the following TLS backends:
 
-- `OpenSSL with QUIC support
-  <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1q+quic>`_
-- GnuTLS >= 3.7.2
-- BoringSSL (commit b95124305ab15c7523d3e21437309fa5dd717ee8)
-- Picotls (commit 7970614ad049d194fe1691bdf0cc66c6930a3a2f)
+- `quictls
+  <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1w+quic>`_
+- GnuTLS >= 3.7.5
+- BoringSSL (commit 8d71d244c0debac4079beeb02b5802fde59b94bd)
+- Picotls (commit ffb2cda165db04a561c2dfab38e1f6d38c7d1f4b)
+- wolfSSL >= 5.5.0
 
 Build from git
 --------------
 
-.. code-block:: text
+.. code-block:: shell
 
-   $ git clone --depth 1 -b OpenSSL_1_1_1q+quic https://github.com/quictls/openssl
+   $ git clone --depth 1 -b OpenSSL_1_1_1w+quic https://github.com/quictls/openssl
    $ cd openssl
    $ # For Linux
    $ ./config enable-tls1_3 --prefix=$PWD/build
@@ -91,6 +92,27 @@ Build from git
    $ ./configure PKG_CONFIG_PATH=$PWD/../openssl/build/lib/pkgconfig:$PWD/../nghttp3/build/lib/pkgconfig LDFLAGS="-Wl,-rpath,$PWD/../openssl/build/lib"
    $ make -j$(nproc) check
 
+Build with BoringSSL
+--------------------
+
+.. code-block:: shell
+
+   $ git clone https://boringssl.googlesource.com/boringssl
+   $ cd boringssl
+   $ git checkout 8d71d244c0debac4079beeb02b5802fde59b94bd
+   $ mkdir build
+   $ cd build
+   $ cmake ..
+   $ make
+   $ cd ..
+   $ mkdir lib
+   $ cd lib
+   $ ln -s ../build/ssl/libssl.a
+   $ ln -s ../build/crypto/libcrypto.a
+   $ cd ../../ngtcp2
+   $ ./configure --with-boringssl BORINGSSL_LIBS="$PWD/../boringssl/lib/libssl.a $PWD/../boringssl/lib/libcrypto.a" BORINGSSL_CFLAGS="-I$PWD/../boringssl/include" PKG_CONFIG_PATH=$PWD/../nghttp3/build/lib/pkgconfig
+   $ make -j$(nproc) check
+
 Client/Server
 -------------
 
@@ -100,9 +122,9 @@ found under examples directory.  They talk HTTP/3.
 Client
 ~~~~~~
 
-.. code-block:: text
+.. code-block:: shell
 
-   $ examples/client [OPTIONS] <HOST> <PORT> [<URI>...]
+   $ examples/qtlsclient [OPTIONS] <HOST> <PORT> [<URI>...]
 
 The notable options are:
 
@@ -112,35 +134,35 @@ The notable options are:
 Server
 ~~~~~~
 
-.. code-block:: text
+.. code-block:: shell
 
-   $ examples/server [OPTIONS] <ADDR> <PORT> <PRIVATE_KEY_FILE> <CERTIFICATE_FILE>
+   $ examples/qtlsserver [OPTIONS] <ADDR> <PORT> <PRIVATE_KEY_FILE> <CERTIFICATE_FILE>
 
 The notable options are:
 
 - ``-V``, ``--validate-addr``: Enforce stateless address validation.
 
-H09client/H09server
--------------------
+H09qtlsclient/H09qtlsserver
+---------------------------
 
-There are h09client and h09server which speak HTTP/0.9.  They are
-written just for `quic-interop-runner
+There are h09qtlsclient and h09qtlsserver which speak HTTP/0.9.  They
+are written just for `quic-interop-runner
 <https://github.com/marten-seemann/quic-interop-runner>`_.  They share
 the basic functionalities with HTTP/3 client and server but have less
-functions (e.g., h09client does not have a capability to send request
-body, and h09server does not understand numeric request path, like
-/1000).
+functions (e.g., h09qtlsclient does not have a capability to send
+request body, and h09qtlsserver does not understand numeric request
+path, like /1000).
 
 Resumption and 0-RTT
 --------------------
 
 In order to resume a session, a session ticket, and a transport
-parameters must be fetched from server.  First, run examples/client
-with --session-file, and --tp-file options which specify a path to
-session ticket, and transport parameter files respectively to save
-them locally.
+parameters must be fetched from server.  First, run
+examples/qtlsclient with --session-file, and --tp-file options which
+specify a path to session ticket, and transport parameter files
+respectively to save them locally.
 
-Once these files are available, run examples/client with the same
+Once these files are available, run examples/qtlsclient with the same
 arguments again.  You will see that session is resumed in your log if
 resumption succeeds.  Resuming session makes server's first Handshake
 packet pretty small because it does not send its certificates.
@@ -156,7 +178,7 @@ established.  Client can send this token in subsequent connection to
 the server.  Server verifies the token and if it succeeds, the address
 validation completes and lifts some restrictions on server which might
 speed up transfer.  In order to save and/or load a token,
-use --token-file option of examples/client.  The given file is
+use --token-file option of examples/qtlsclient.  The given file is
 overwritten if it already exists when storing a token.
 
 Crypto helper library
@@ -170,29 +192,31 @@ The header file exists under crypto/includes/ngtcp2 directory.
 Each library file is built for a particular TLS backend.  The
 available crypto helper libraries are:
 
-- libngtcp2_crypto_openssl: Use OpenSSL as TLS backend
+- libngtcp2_crypto_quictls: Use quictls as TLS backend
 - libngtcp2_crypto_gnutls: Use GnuTLS as TLS backend
 - libngtcp2_crypto_boringssl: Use BoringSSL as TLS backend
 - libngtcp2_crypto_picotls: Use Picotls as TLS backend
+- libngtcp2_crypto_wolfssl: Use wolfSSL as TLS backend
 
 Because BoringSSL and Picotls are an unversioned product, we only
 tested their particular revision.  See Requirements section above.
 
-We use Picotls with OpenSSL as crypto backend.  It does not work with
-OpenSSL >= 3.0.0.
+We use Picotls with OpenSSL as crypto backend.
 
 The examples directory contains client and server that are linked to
 those crypto helper libraries and TLS backends.  They are only built
 if their corresponding crypto helper library is built:
 
-- client: OpenSSL client
-- server: OpenSSL server
+- qtlsclient: quictls client
+- qtlsserver: quictls server
 - gtlsclient: GnuTLS client
 - gtlsserver: GnuTLS server
 - bsslclient: BoringSSL client
 - bsslserver: BoringSSL server
 - ptlsclient: Picotls client
 - ptlsserver: Picotls server
+- wsslclient: wolfSSL client
+- wsslserver: wolfSSL server
 
 QUIC protocol extensions
 -------------------------
@@ -202,11 +226,11 @@ The library implements the following QUIC protocol extensions:
 - `An Unreliable Datagram Extension to QUIC
   <https://datatracker.ietf.org/doc/html/rfc9221>`_
 - `Greasing the QUIC Bit
-  <https://datatracker.ietf.org/doc/html/draft-ietf-quic-bit-grease>`_
+  <https://datatracker.ietf.org/doc/html/rfc9287>`_
 - `Compatible Version Negotiation for QUIC
-  <https://datatracker.ietf.org/doc/html/draft-ietf-quic-version-negotiation>`_
+  <https://datatracker.ietf.org/doc/html/rfc9368>`_
 - `QUIC Version 2
-  <https://datatracker.ietf.org/doc/html/draft-ietf-quic-v2>`_
+  <https://datatracker.ietf.org/doc/html/rfc9369>`_
 
 Configuring Wireshark for QUIC
 ------------------------------
@@ -216,7 +240,7 @@ analyze QUIC traffic using the following steps:
 
 1. Set *SSLKEYLOGFILE* environment variable:
 
-   .. code-block:: text
+   .. code-block:: shell
 
       $ export SSLKEYLOGFILE=quic_keylog_file
 
@@ -228,7 +252,7 @@ analyze QUIC traffic using the following steps:
 
 3. Set Pre-Master-Secret logfile
 
-   Go to *Preferences->Protocols->TLS* add set the *Pre-Master-Secret
+   Go to *Preferences->Protocols->TLS* and set the *Pre-Master-Secret
    log file* to the same value that was specified for *SSLKEYLOGFILE*.
 
 4. Choose the correct network interface for capturing

@@ -2,17 +2,189 @@ name: build
 
 on: [push, pull_request]
 
+permissions: read-all
+
+env:
+  OPENSSL1_VERSION: 1_1_1w+quic
+  OPENSSL3_VERSION: 3.1.4+quic
+  BORINGSSL_VERSION: 8d71d244c0debac4079beeb02b5802fde59b94bd
+  PICOTLS_VERSION: ffb2cda165db04a561c2dfab38e1f6d38c7d1f4b
+  WOLFSSL_VERSION: v5.6.3-stable
+  NGHTTP3_VERSION: head
+
 jobs:
-  build:
+  setup:
+    runs-on: ubuntu-22.04
+
+    outputs:
+      nghttp3-version: ${{ steps.nghttp3-version.outputs.result }}
+
+    steps:
+    - id: nghttp3-version
+      uses: actions/github-script@v6
+      with:
+        result-encoding: string
+        script: |
+          let version = '${{ env.NGHTTP3_VERSION }}'
+
+          if (version != 'head') {
+              return version
+          }
+
+          let { data: commits } = await github.rest.repos.listCommits({
+              owner: 'ngtcp2',
+              repo: 'nghttp3',
+          })
+
+          return commits[0].sha
+
+  build-cache:
+    needs:
+    - setup
+
     strategy:
       matrix:
-        os: [ubuntu-22.04, macos-11]
+        os: [ubuntu-22.04, macos-12]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Restore OpenSSL v1.1.1 cache
+      id: cache-openssl1
+      uses: actions/cache@v3
+      with:
+        path: openssl1/build
+        key: ${{ runner.os }}-openssl-${{ env.OPENSSL1_VERSION }}
+    - name: Restore OpenSSL v3.x cache
+      id: cache-openssl3
+      uses: actions/cache@v3
+      with:
+        path: openssl3/build
+        key: ${{ runner.os }}-openssl-${{ env.OPENSSL3_VERSION }}
+    - name: Restore BoringSSL cache
+      id: cache-boringssl
+      uses: actions/cache@v3
+      with:
+        path: |
+          boringssl/build/crypto/libcrypto.a
+          boringssl/build/ssl/libssl.a
+          boringssl/include
+        key: ${{ runner.os }}-boringssl-${{ env.BORINGSSL_VERSION }}
+    - name: Restore Picotls + OpenSSL v1.1.1 cache
+      id: cache-picotls-openssl1
+      uses: actions/cache@v3
+      with:
+        path: |
+          picotls-openssl1/build/libpicotls-core.a
+          picotls-openssl1/build/libpicotls-openssl.a
+          picotls-openssl1/include
+        key: ${{ runner.os }}-picotls-${{ env.PICOTLS_VERSION }}-openssl-${{ env.OPENSSL1_VERSION }}
+    - name: Restore Picotls + OpenSSL v3.x cache
+      id: cache-picotls-openssl3
+      uses: actions/cache@v3
+      with:
+        path: |
+          picotls-openssl3/build/libpicotls-core.a
+          picotls-openssl3/build/libpicotls-openssl.a
+          picotls-openssl3/include
+        key: ${{ runner.os }}-picotls-${{ env.PICOTLS_VERSION }}-openssl-${{ env.OPENSSL3_VERSION }}
+    - name: Restore wolfSSL cache
+      id: cache-wolfssl
+      uses: actions/cache@v3
+      with:
+        path: wolfssl/build
+        key: ${{ runner.os }}-wolfssl-${{ env.WOLFSSL_VERSION }}
+    - name: Restore nghttp3 cache
+      id: cache-nghttp3
+      uses: actions/cache@v3
+      with:
+        path: nghttp3/build
+        key: ${{ runner.os }}-nghttp3-${{ needs.setup.outputs.nghttp3-version }}
+    - id: settings
+      if: |
+        steps.cache-openssl1.outputs.cache-hit != 'true' ||
+        steps.cache-openssl3.outputs.cache-hit != 'true' ||
+        steps.cache-boringssl.outputs.cache-hit != 'true' ||
+        steps.cache-picotls-openssl1.outputs.cache-hit != 'true' ||
+        steps.cache-picotls-openssl3.outputs.cache-hit != 'true' ||
+        steps.cache-wolfssl.outputs.cache-hit != 'true' ||
+        steps.cache-nghttp3.outputs.cache-hit != 'true'
+      run: |
+        echo 'needs-build=true' >> $GITHUB_OUTPUT
+    - name: Linux setup
+      if: runner.os == 'Linux' && steps.settings.outputs.needs-build == 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install \
+          g++-12 \
+          autoconf \
+          automake \
+          autotools-dev \
+          libtool \
+          pkg-config \
+          cmake \
+          cmake-data
+
+        echo 'NPROC='"$(nproc)" >> $GITHUB_ENV
+    - name: MacOS setup
+      if: runner.os == 'macOS' && steps.settings.outputs.needs-build == 'true'
+      run: |
+        brew install autoconf automake pkg-config libtool
+
+        echo 'NPROC='"$(sysctl -n hw.ncpu)" >> $GITHUB_ENV
+    - name: Build OpenSSL v1.1.1
+      if: steps.cache-openssl1.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_openssl.sh
+      env:
+        OPENSSL: openssl1
+    - name: Build OpenSSL v3.x
+      if: steps.cache-openssl3.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_openssl.sh
+      env:
+        OPENSSL: openssl3
+    - name: Build BoringSSL
+      if: steps.cache-boringssl.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_boringssl.sh
+    - name: Build Picotls + OpenSSL v1.1.1
+      if: steps.cache-picotls-openssl1.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_picotls.sh
+      env:
+        OPENSSL: openssl1
+    - name: Build Picotls + OpenSSL v3.x
+      if: steps.cache-picotls-openssl3.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_picotls.sh
+      env:
+        OPENSSL: openssl3
+    - name: Build wolfSSL
+      if: steps.cache-wolfssl.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_wolfssl.sh
+    - name: Build nghttp3
+      if: steps.cache-nghttp3.outputs.cache-hit != 'true'
+      run: |
+        ./ci/build_nghttp3.sh
+      env:
+        NGHTTP3_VERSION: ${{ needs.setup.outputs.nghttp3-version }}
+
+  build:
+    needs:
+    - build-cache
+
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-12]
         compiler: [gcc, clang]
         buildtool: [autotools, distcheck, cmake]
         openssl: [openssl1, openssl3]
         sockaddr: [native-sockaddr, generic-sockaddr]
         exclude:
-        - os: macos-11
+        - os: macos-12
           buildtool: distcheck
         - compiler: gcc
           buildtool: distcheck
@@ -26,24 +198,25 @@ jobs:
           sockaddr: generic-sockaddr
         - buildtool: cmake
           sockaddr: generic-sockaddr
-        - os: macos-11
+        - os: macos-12
           compiler: gcc
-        - os: macos-11
+        - os: macos-12
           openssl: openssl3
 
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Startup
       run: |
         echo 'NGTCP2_SOURCE_DIR='"$PWD" >> $GITHUB_ENV
     - name: Linux setup
       if: runner.os == 'Linux'
       run: |
+        sudo apt-get update
         sudo apt-get install \
-          g++-11 \
-          clang-12 \
+          g++-12 \
+          clang-15 \
           autoconf \
           automake \
           autotools-dev \
@@ -54,7 +227,8 @@ jobs:
           libev-dev \
           libgnutls28-dev \
           cmake \
-          cmake-data
+          cmake-data \
+          python3-pytest
 
         echo 'NPROC='"$(nproc)" >> $GITHUB_ENV
     - name: MacOS setup
@@ -66,8 +240,8 @@ jobs:
     - name: Setup clang (Linux)
       if: runner.os == 'Linux' && matrix.compiler == 'clang'
       run: |
-        echo 'CC=clang-12' >> $GITHUB_ENV
-        echo 'CXX=clang++-12' >> $GITHUB_ENV
+        echo 'CC=clang-15' >> $GITHUB_ENV
+        echo 'CXX=clang++-15' >> $GITHUB_ENV
     - name: Setup clang (MacOS)
       if: runner.os == 'macOS' && matrix.compiler == 'clang'
       run: |
@@ -76,34 +250,80 @@ jobs:
     - name: Setup gcc
       if: runner.os == 'Linux' && matrix.compiler == 'gcc'
       run: |
-        echo 'CC=gcc-11' >> $GITHUB_ENV
-        echo 'CXX=g++-11' >> $GITHUB_ENV
-    - name: Build OpenSSL v1.1.1
+        echo 'CC=gcc-12' >> $GITHUB_ENV
+        echo 'CXX=g++-12' >> $GITHUB_ENV
+    - name: Restore OpenSSL v1.1.1 cache
+      uses: actions/cache/restore@v3
       if: matrix.openssl == 'openssl1'
-      run: |
-        ./ci/build_openssl1.sh
-    - name: Build OpenSSL v3.0.x
+      with:
+        path: openssl1/build
+        key: ${{ runner.os }}-openssl-${{ env.OPENSSL1_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore OpenSSL v3.x cache
+      uses: actions/cache/restore@v3
       if: matrix.openssl == 'openssl3'
-      run: |
-        ./ci/build_openssl3.sh
-    - name: Build BoringSSL
-      run: |
-        ./ci/build_boringssl.sh
-    - name: Build Picotls
+      with:
+        path: openssl3/build
+        key: ${{ runner.os }}-openssl-${{ env.OPENSSL3_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore BoringSSL cache
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          boringssl/build/crypto/libcrypto.a
+          boringssl/build/ssl/libssl.a
+          boringssl/include
+        key: ${{ runner.os }}-boringssl-${{ env.BORINGSSL_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore Picotls + OpenSSL v1.1.1 cache
+      uses: actions/cache/restore@v3
       if: matrix.openssl == 'openssl1'
-      run: |
-        ./ci/build_picotls.sh
-    - name: Build nghttp3
-      run: |
-        ./ci/build_nghttp3.sh
+      with:
+        path: |
+          picotls-openssl1/build/libpicotls-core.a
+          picotls-openssl1/build/libpicotls-openssl.a
+          picotls-openssl1/include
+        key: ${{ runner.os }}-picotls-${{ env.PICOTLS_VERSION }}-openssl-${{ env.OPENSSL1_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore Picotls + OpenSSL v3.x cache
+      uses: actions/cache/restore@v3
+      if: matrix.openssl == 'openssl3'
+      with:
+        path: |
+          picotls-openssl3/build/libpicotls-core.a
+          picotls-openssl3/build/libpicotls-openssl.a
+          picotls-openssl3/include
+        key: ${{ runner.os }}-picotls-${{ env.PICOTLS_VERSION }}-openssl-${{ env.OPENSSL3_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore wolfSSL cache
+      uses: actions/cache/restore@v3
+      with:
+        path: wolfssl/build
+        key: ${{ runner.os }}-wolfssl-${{ env.WOLFSSL_VERSION }}
+        fail-on-cache-miss: true
+    - name: Restore nghttp3 cache
+      uses: actions/cache/restore@v3
+      with:
+        path: nghttp3/build
+        key: ${{ runner.os }}-nghttp3-${{ needs.setup.outputs.nghttp3-version }}
+        fail-on-cache-miss: true
     - name: Setup environment variables
       run: |
-        PKG_CONFIG_PATH="$PWD/openssl/build/lib/pkgconfig:$PWD/openssl/build/lib64/pkgconfig:$PWD/nghttp3/build/lib/pkgconfig"
-        LDFLAGS="$EXTRA_LDFLAGS -Wl,-rpath,$PWD/openssl/build/lib -Wl,-rpath,$PWD/openssl/build/lib64"
+        PKG_CONFIG_PATH="$PWD/openssl1/build/lib/pkgconfig:$PWD/openssl3/build/lib64/pkgconfig:$PWD/wolfssl/build/lib/pkgconfig:$PWD/nghttp3/build/lib/pkgconfig"
+        LDFLAGS="$EXTRA_LDFLAGS -Wl,-rpath,$PWD/openssl1/build/lib -Wl,-rpath,$PWD/openssl3/build/lib64"
         BORINGSSL_CFLAGS="-I$PWD/boringssl/include/"
         BORINGSSL_LIBS="-L$PWD/boringssl/build/ssl -lssl -L$PWD/boringssl/build/crypto -lcrypto"
-        PICOTLS_CFLAGS="-I$PWD/picotls/include/"
-        PICOTLS_LIBS="-L$PWD/picotls/build -lpicotls-openssl -lpicotls-core"
+
+        if [ "${{ matrix.openssl }}" = "openssl1" ]; then
+          PICOTLS_PREFIX="$PWD/picotls-openssl1"
+        else
+          PICOTLS_PREFIX="$PWD/picotls-openssl3"
+        fi
+
+        PICOTLS_CFLAGS="-I$PICOTLS_PREFIX/include/"
+        PICOTLS_LIBS="-L$PICOTLS_PREFIX/build -lpicotls-openssl -lpicotls-core"
+
+        AUTOTOOLS_OPTS="--enable-werror --with-libnghttp3 --with-openssl --with-gnutls --with-boringssl --with-wolfssl --with-picotls"
 
         echo 'PKG_CONFIG_PATH='"$PKG_CONFIG_PATH" >> $GITHUB_ENV
         echo 'LDFLAGS='"$LDFLAGS" >> $GITHUB_ENV
@@ -111,6 +331,8 @@ jobs:
         echo 'BORINGSSL_LIBS='"$BORINGSSL_LIBS" >> $GITHUB_ENV
         echo 'PICOTLS_CFLAGS='"$PICOTLS_CFLAGS" >> $GITHUB_ENV
         echo 'PICOTLS_LIBS='"$PICOTLS_LIBS" >> $GITHUB_ENV
+        echo 'PICOTLS_PREFIX='"$PICOTLS_PREFIX" >> $GITHUB_ENV
+        echo 'AUTOTOOLS_OPTS='"$AUTOTOOLS_OPTS" >> $GITHUB_ENV
     - name: Enable ASAN
       if: runner.os == 'Linux'
       run: |
@@ -132,26 +354,15 @@ jobs:
     - name: Enable generic sockaddr
       if: matrix.sockaddr == 'generic-sockaddr'
       run: |
-        CFLAGS="$CFLAGS -DNGTCP2_USE_GENERIC_SOCKADDR"
-        EXTRA_AUTOTOOLS_OPTS="$EXTRA_AUTOTOOLS_OPTS --enable-lib-only"
+        CFLAGS="$CFLAGS -DNGTCP2_USE_GENERIC_SOCKADDR -DNGTCP2_AF_INET=97 -DNGTCP2_AF_INET6=98"
+        AUTOTOOLS_OPTS="$AUTOTOOLS_OPTS --enable-lib-only"
 
         echo 'CFLAGS='"$CFLAGS" >> $GITHUB_ENV
-        echo 'EXTRA_AUTOTOOLS_OPTS='"$EXTRA_AUTOTOOLS_OPTS" >> $GITHUB_ENV
-    - name: Enable Picotls when OpenSSL is v1
-      if: matrix.openssl == 'openssl1'
-      run: |
-        EXTRA_AUTOTOOLS_OPTS="$EXTRA_AUTOTOOLS_OPTS --with-picotls"
-        CMAKE_OPTS="$CMAKE_OPTS -DENABLE_PICOTLS=ON"
-
-        echo 'HAVE_PICOTLS=1' >> $GITHUB_ENV
-        echo 'EXTRA_AUTOTOOLS_OPTS='"$EXTRA_AUTOTOOLS_OPTS" >> $GITHUB_ENV
-        echo 'CMAKE_OPTS='"$CMAKE_OPTS" >> $GITHUB_ENV
+        echo 'AUTOTOOLS_OPTS='"$AUTOTOOLS_OPTS" >> $GITHUB_ENV
     - name: Configure autotools
       if: matrix.buildtool == 'autotools'
       run: |
-        autoreconf -i && \
-        ./configure --enable-werror \
-          --with-openssl --with-gnutls --with-boringssl $EXTRA_AUTOTOOLS_OPTS
+        autoreconf -i && ./configure $AUTOTOOLS_OPTS
     - name: Configure autotools for distcheck
       if: matrix.buildtool == 'distcheck'
       run: |
@@ -171,12 +382,15 @@ jobs:
         echo 'NGTCP2_BUILD_DIR='"$PWD" >> $GITHUB_ENV
 
         cmake $CMAKE_OPTS \
+          -DENABLE_WERROR=ON \
           -DENABLE_GNUTLS=ON \
           -DENABLE_BORINGSSL=ON \
           -DBORINGSSL_LIBRARIES="$BORINGSSL_LIBS" \
           -DBORINGSSL_INCLUDE_DIR="$NGTCP2_SOURCE_DIR/boringssl/include/" \
+          -DENABLE_PICOTLS=ON \
           -DPICOTLS_LIBRARIES="$PICOTLS_LIBS" \
-          -DPICOTLS_INCLUDE_DIR="$NGTCP2_SOURCE_DIR/picotls/include/" ..
+          -DPICOTLS_INCLUDE_DIR="$PICOTLS_PREFIX/include/" \
+          -DENABLE_WOLFSSL=ON ..
     - name: Build ngtcp2
       if: matrix.buildtool != 'distcheck'
       run: |
@@ -186,20 +400,26 @@ jobs:
     - name: Build ngtcp2 with distcheck
       if: matrix.buildtool == 'distcheck'
       run: |
-        make -j"$NPROC" distcheck \
-          DISTCHECK_CONFIGURE_FLAGS="--enable-werror --with-openssl --with-gnutls --with-boringssl $EXTRA_AUTOTOOLS_OPTS"
+        make -j"$NPROC" distcheck DISTCHECK_CONFIGURE_FLAGS="$AUTOTOOLS_OPTS"
+    - name: examples/tests
+      if: matrix.buildtool == 'autotools' && matrix.sockaddr == 'native-sockaddr' && runner.os == 'Linux'
+      run: |
+        cd examples/tests
+        # Do not run resumption and earlydata between gtlsserver and
+        # wsslclient until ubuntu gets GnuTLS v3.7.5.
+        #
+        # There is an issue around the ticket age validation between
+        # gtlsserver and bsslclient that causes early data test
+        # failure; see https://gitlab.com/gnutls/gnutls/-/issues/1403
+        pytest-3 -v -k 'not (gnutls-wolfssl and (resume or earlydata)) and not (gnutls-boringssl and earlydata)'
     - name: Integration test
       if: matrix.buildtool != 'distcheck' && matrix.sockaddr == 'native-sockaddr'
       run: |
         [ -n "$NGTCP2_BUILD_DIR" ] && cd "$NGTCP2_BUILD_DIR"
         "$NGTCP2_SOURCE_DIR"/ci/gen-certificate.sh
 
-        CLIENTS="client gtlsclient bsslclient"
-        SERVERS="server gtlsserver bsslserver"
-        if [ "$HAVE_PICOTLS" = "1" ]; then
-          CLIENTS="$CLIENTS ptlsclient"
-          SERVERS="$SERVERS ptlsserver"
-        fi
+        CLIENTS="qtlsclient gtlsclient bsslclient wsslclient ptlsclient"
+        SERVERS="qtlsserver gtlsserver bsslserver wsslserver ptlsserver"
 
         for client in $CLIENTS; do
           for server in $SERVERS; do
@@ -208,7 +428,6 @@ jobs:
             SVPID="$!"
             ./examples/$client localhost 4433 https://localhost/ --exit-on-first-stream-close
             kill -INT "$SVPID"
-            sleep 5
             if wait "$SVPID"; then
               cat sv.log
             else
@@ -235,7 +454,7 @@ jobs:
       OSCC: ${{ matrix.oscc }}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Linux setup
       run: |
         sudo dpkg --add-architecture i386
@@ -279,15 +498,28 @@ jobs:
         wine main.exe
 
   build-windows:
+    strategy:
+      matrix:
+        arch: [x86, x64]
+        include:
+        - arch: x86
+          platform: Win32
+        - arch: x64
+          platform: x64
+
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+    - uses: microsoft/setup-msbuild@v1
+    - run: |
+        vcpkg --triplet=${{ matrix.arch }}-windows install cunit
     - name: Configure cmake
       run: |
         mkdir build
         cd build
-        cmake ..
+        cmake -DENABLE_WERROR=ON -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} -DVCPKG_TARGET_TRIPLET=${{ matrix.arch}}-windows ..
     - name: Build ngtcp2
       run: |
         cmake --build build
+        cmake --build build --target check

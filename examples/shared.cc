@@ -34,6 +34,12 @@
 #ifdef HAVE_NETINET_IN_H
 #  include <netinet/in.h>
 #endif // HAVE_NETINET_IN_H
+#ifdef HAVE_NETINET_UDP_H
+#  include <netinet/udp.h>
+#endif // HAVE_NETINET_UDP_H
+#ifdef HAVE_NETINET_IP_H
+#  include <netinet/ip.h>
+#endif // HAVE_NETINET_IP_H
 #ifdef HAVE_ASM_TYPES_H
 #  include <asm/types.h>
 #endif // HAVE_ASM_TYPES_H
@@ -52,9 +58,14 @@ unsigned int msghdr_get_ecn(msghdr *msg, int family) {
   switch (family) {
   case AF_INET:
     for (auto cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
-      if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TOS &&
-          cmsg->cmsg_len) {
-        return *reinterpret_cast<uint8_t *>(CMSG_DATA(cmsg));
+      if (cmsg->cmsg_level == IPPROTO_IP &&
+#ifdef __APPLE__
+          cmsg->cmsg_type == IP_RECVTOS
+#else  // !__APPLE__
+          cmsg->cmsg_type == IP_TOS
+#endif // !__APPLE__
+          && cmsg->cmsg_len) {
+        return *reinterpret_cast<uint8_t *>(CMSG_DATA(cmsg)) & IPTOS_ECN_MASK;
       }
     }
     break;
@@ -62,30 +73,17 @@ unsigned int msghdr_get_ecn(msghdr *msg, int family) {
     for (auto cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
       if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_TCLASS &&
           cmsg->cmsg_len) {
-        return *reinterpret_cast<uint8_t *>(CMSG_DATA(cmsg));
+        unsigned int tos;
+
+        memcpy(&tos, CMSG_DATA(cmsg), sizeof(int));
+
+        return tos & IPTOS_ECN_MASK;
       }
     }
     break;
   }
 
   return 0;
-}
-
-void fd_set_ecn(int fd, int family, unsigned int ecn) {
-  switch (family) {
-  case AF_INET:
-    if (setsockopt(fd, IPPROTO_IP, IP_TOS, &ecn,
-                   static_cast<socklen_t>(sizeof(ecn))) == -1) {
-      std::cerr << "setsockopt: " << strerror(errno) << std::endl;
-    }
-    break;
-  case AF_INET6:
-    if (setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &ecn,
-                   static_cast<socklen_t>(sizeof(ecn))) == -1) {
-      std::cerr << "setsockopt: " << strerror(errno) << std::endl;
-    }
-    break;
-  }
 }
 
 void fd_set_recv_ecn(int fd, int family) {
@@ -153,18 +151,30 @@ void fd_set_ip_dontfrag(int fd, int family) {
 #endif // defined(IP_DONTFRAG) && defined(IPV6_DONTFRAG)
 }
 
+void fd_set_udp_gro(int fd) {
+#ifdef UDP_GRO
+  int val = 1;
+
+  if (setsockopt(fd, IPPROTO_UDP, UDP_GRO, &val,
+                 static_cast<socklen_t>(sizeof(val))) == -1) {
+    std::cerr << "setsockopt: UDP_GRO: " << strerror(errno) << std::endl;
+  }
+#endif // UDP_GRO
+}
+
 std::optional<Address> msghdr_get_local_addr(msghdr *msg, int family) {
   switch (family) {
   case AF_INET:
     for (auto cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
       if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
-        auto pktinfo = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cmsg));
+        in_pktinfo pktinfo;
+        memcpy(&pktinfo, CMSG_DATA(cmsg), sizeof(pktinfo));
         Address res{};
-        res.ifindex = pktinfo->ipi_ifindex;
+        res.ifindex = pktinfo.ipi_ifindex;
         res.len = sizeof(res.su.in);
         auto &sa = res.su.in;
         sa.sin_family = AF_INET;
-        sa.sin_addr = pktinfo->ipi_addr;
+        sa.sin_addr = pktinfo.ipi_addr;
         return res;
       }
     }
@@ -172,19 +182,36 @@ std::optional<Address> msghdr_get_local_addr(msghdr *msg, int family) {
   case AF_INET6:
     for (auto cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
       if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
-        auto pktinfo = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cmsg));
+        in6_pktinfo pktinfo;
+        memcpy(&pktinfo, CMSG_DATA(cmsg), sizeof(pktinfo));
         Address res{};
-        res.ifindex = pktinfo->ipi6_ifindex;
+        res.ifindex = pktinfo.ipi6_ifindex;
         res.len = sizeof(res.su.in6);
         auto &sa = res.su.in6;
         sa.sin6_family = AF_INET6;
-        sa.sin6_addr = pktinfo->ipi6_addr;
+        sa.sin6_addr = pktinfo.ipi6_addr;
         return res;
       }
     }
     return {};
   }
   return {};
+}
+
+size_t msghdr_get_udp_gro(msghdr *msg) {
+  uint16_t gso_size = 0;
+
+#ifdef UDP_GRO
+  for (auto cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+    if (cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO) {
+      memcpy(&gso_size, CMSG_DATA(cmsg), sizeof(gso_size));
+
+      break;
+    }
+  }
+#endif // UDP_GRO
+
+  return gso_size;
 }
 
 void set_port(Address &dst, Address &src) {
@@ -212,12 +239,14 @@ struct nlmsg {
 };
 
 namespace {
-int send_netlink_msg(int fd, const Address &remote_addr) {
+int send_netlink_msg(int fd, const Address &remote_addr, uint32_t seq) {
   nlmsg nlmsg{};
   nlmsg.hdr.nlmsg_type = RTM_GETROUTE;
   nlmsg.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+  nlmsg.hdr.nlmsg_seq = seq;
 
   nlmsg.msg.rtm_family = remote_addr.su.sa.sa_family;
+  nlmsg.msg.rtm_protocol = RTPROT_KERNEL;
 
   nlmsg.dst.rta_type = RTA_DST;
 
@@ -265,7 +294,7 @@ int send_netlink_msg(int fd, const Address &remote_addr) {
 } // namespace
 
 namespace {
-int recv_netlink_msg(in_addr_union &iau, int fd) {
+int recv_netlink_msg(in_addr_union &iau, int fd, uint32_t seq) {
   std::array<uint8_t, 8192> buf;
   iovec iov = {buf.data(), buf.size()};
   sockaddr_nl sa{};
@@ -288,11 +317,24 @@ int recv_netlink_msg(in_addr_union &iau, int fd) {
     return -1;
   }
 
+  size_t in_addrlen = 0;
+
   for (auto hdr = reinterpret_cast<nlmsghdr *>(buf.data());
        NLMSG_OK(hdr, nread); hdr = NLMSG_NEXT(hdr, nread)) {
+    if (seq != hdr->nlmsg_seq) {
+      std::cerr << "netlink: unexpected sequence number " << hdr->nlmsg_seq
+                << " while expecting " << seq << std::endl;
+      return -1;
+    }
+
+    if (hdr->nlmsg_flags & NLM_F_MULTI) {
+      std::cerr << "netlink: unexpected NLM_F_MULTI flag set" << std::endl;
+      return -1;
+    }
+
     switch (hdr->nlmsg_type) {
     case NLMSG_DONE:
-      std::cerr << "netlink: no info returned from kernel" << std::endl;
+      std::cerr << "netlink: unexpected NLMSG_DONE" << std::endl;
       return -1;
     case NLMSG_NOOP:
       continue;
@@ -312,8 +354,6 @@ int recv_netlink_msg(in_addr_union &iau, int fd) {
         continue;
       }
 
-      size_t in_addrlen;
-
       switch (static_cast<rtmsg *>(NLMSG_DATA(hdr))->rtm_family) {
       case AF_INET:
         in_addrlen = sizeof(in_addr);
@@ -332,11 +372,73 @@ int recv_netlink_msg(in_addr_union &iau, int fd) {
 
       memcpy(&iau, RTA_DATA(rta), in_addrlen);
 
-      return 0;
+      break;
     }
   }
 
-  return -1;
+  if (in_addrlen == 0) {
+    return -1;
+  }
+
+  // Read ACK
+  sa = {};
+  msg = {};
+
+  msg.msg_name = &sa;
+  msg.msg_namelen = sizeof(sa);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+
+  int error = -1;
+
+  do {
+    nread = recvmsg(fd, &msg, 0);
+  } while (nread == -1 && errno == EINTR);
+
+  if (nread == -1) {
+    std::cerr << "recvmsg: Could not receive netlink message: "
+              << strerror(errno) << std::endl;
+    return -1;
+  }
+
+  error = -1;
+
+  for (auto hdr = reinterpret_cast<nlmsghdr *>(buf.data());
+       NLMSG_OK(hdr, nread); hdr = NLMSG_NEXT(hdr, nread)) {
+    if (seq != hdr->nlmsg_seq) {
+      std::cerr << "netlink: unexpected sequence number " << hdr->nlmsg_seq
+                << " while expecting " << seq << std::endl;
+      return -1;
+    }
+
+    if (hdr->nlmsg_flags & NLM_F_MULTI) {
+      std::cerr << "netlink: unexpected NLM_F_MULTI flag set" << std::endl;
+      return -1;
+    }
+
+    switch (hdr->nlmsg_type) {
+    case NLMSG_DONE:
+      std::cerr << "netlink: unexpected NLMSG_DONE" << std::endl;
+      return -1;
+    case NLMSG_NOOP:
+      continue;
+    case NLMSG_ERROR:
+      error = -static_cast<nlmsgerr *>(NLMSG_DATA(hdr))->error;
+      if (error == 0) {
+        break;
+      }
+
+      std::cerr << "netlink: " << strerror(error) << std::endl;
+
+      return -1;
+    }
+  }
+
+  if (error != 0) {
+    return -1;
+  }
+
+  return 0;
 }
 } // namespace
 
@@ -359,11 +461,13 @@ int get_local_addr(in_addr_union &iau, const Address &remote_addr) {
     return -1;
   }
 
-  if (send_netlink_msg(fd, remote_addr) != 0) {
+  uint32_t seq = 1;
+
+  if (send_netlink_msg(fd, remote_addr, seq) != 0) {
     return -1;
   }
 
-  return recv_netlink_msg(iau, fd);
+  return recv_netlink_msg(iau, fd, seq);
 }
 
 #endif // HAVE_LINUX_NETLINK_H

@@ -27,7 +27,7 @@ SUBDIRS += includes
 endif
 
 if HAVE_OPENSSL
-SUBDIRS += openssl
+SUBDIRS += quictls
 endif
 
 if HAVE_GNUTLS
@@ -40,6 +40,10 @@ endif
 
 if HAVE_PICOTLS
 SUBDIRS += picotls
+endif
+
+if HAVE_WOLFSSL
+SUBDIRS += wolfssl
 endif
 
 EXTRA_DIST = CMakeLists.txt

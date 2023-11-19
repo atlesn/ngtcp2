@@ -1,8 +1,7 @@
-The ngtcp2 programmers' guide for early adopters
-================================================
+The ngtcp2 programmers' guide
+=============================
 
-This document is written for early adopters of ngtcp2 library.  It
-describes a brief introduction of programming ngtcp2.
+This document describes a brief introduction of programming ngtcp2.
 
 Prerequisites
 -------------
@@ -19,11 +18,11 @@ to build QUIC application you have to choose one of them.  Here is the
 list of TLS stacks which are supposed to provide such interface and
 for which we provide crypto helper libraries:
 
-* `OpenSSL with QUIC support
-  <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1q+quic>`_
-* GnuTLS >= 3.7.2
+* `quictls <https://github.com/quictls/openssl>`_
+* GnuTLS
 * BoringSSL
 * Picotls
+* wolfSSL
 
 Creating ngtcp2_conn object
 ---------------------------
@@ -121,23 +120,26 @@ value.  It could be any timestamp which increases monotonically, and
 actual value does not matter.
 
 :type:`ngtcp2_transport_params` contains QUIC transport parameters
-which is sent to a remote endpoint during handshake.  All fields must
-be set.  Application should call `ngtcp2_transport_params_default()`
-to set the default values.
+which is sent to a remote endpoint during handshake.  Application
+should call `ngtcp2_transport_params_default()` to set the default
+values.  Server must set
+:member:`ngtcp2_transport_params.original_dcid` and set
+:member:`ngtcp2_transport_params.original_dcid_present` to nonzero.
 
 Client application has to supply Connection IDs to
 `ngtcp2_conn_client_new()`.  The *dcid* parameter is the destination
 connection ID (DCID), and which should be random byte string and at
 least 8 bytes long.  The *scid* is the source connection ID (SCID)
-which identifies the client itself.  The *version* parameter is the
-QUIC version to use.  It should be :macro:`NGTCP2_PROTO_VER_V1`.
+which identifies the client itself.  The *client_chosen_version*
+parameter is the QUIC version to use.  It should be
+:macro:`NGTCP2_PROTO_VER_V1`.
 
 Similarly, server application has to supply these parameters to
 `ngtcp2_conn_server_new()`.  But the *dcid* must be the same value
 which is received from client (which is client SCID).  The *scid* is
 chosen by server.  Don't use DCID in client packet as server SCID.
-The *version* parameter is the QUIC version to use.  It should be
-:macro:`NGTCP2_PROTO_VER_V1`.
+The *client_chosen_version* parameter is the QUIC version that client
+has chosen.
 
 A path is very important to QUIC connection.  It is the pair of
 endpoints, local and remote.  The path passed to
@@ -161,10 +163,10 @@ helper functions to make it easier for applications to configure TLS
 stack object to work with QUIC and ngtcp2.  They are specific to each
 supported TLS stack:
 
-- OpenSSL
+- quictls
 
-  * `ngtcp2_crypto_openssl_configure_client_context`
-  * `ngtcp2_crypto_openssl_configure_server_context`
+  * `ngtcp2_crypto_quictls_configure_client_context`
+  * `ngtcp2_crypto_quictls_configure_server_context`
 
 - BoringSSL
 
@@ -182,6 +184,11 @@ supported TLS stack:
   * `ngtcp2_crypto_picotls_configure_server_context`
   * `ngtcp2_crypto_picotls_configure_client_session`
   * `ngtcp2_crypto_picotls_configure_server_session`
+
+- wolfSSL
+
+  * `ngtcp2_crypto_wolfssl_configure_client_context`
+  * `ngtcp2_crypto_wolfssl_configure_server_context`
 
 They make the minimal QUIC specific changes to TLS stack object.  See
 the ngtcp2 crypto API header files for each supported TLS stack.  In
@@ -216,18 +223,34 @@ Read and write packets
 `ngtcp2_conn_read_pkt()` processes the incoming QUIC packets.  In
 order to write QUIC packets, call `ngtcp2_conn_writev_stream()` or
 `ngtcp2_conn_write_pkt()`.  The *destlen* parameter must be at least
-the value returned from `ngtcp2_conn_get_max_udp_payload_size()`.
+the value returned from `ngtcp2_conn_get_max_tx_udp_payload_size()`.
 
 In order to send stream data, the application has to first open a
-stream.  Use `ngtcp2_conn_open_bidi_stream()` to open bidirectional
+stream.  In earliest, clients can open streams after installing 1RTT
+RX(decryption) key, which is notified by
+:member:`ngtcp2_callbacks.recv_rx_key`.  Because the key is installed
+just before handshake completion, handshake completion (see
+:member:`ngtcp2_callbacks.handshake_completed`) is also a good signal
+to start opening streams.  For convenience,
+:member:`ngtcp2_callbacks.extend_max_local_streams_bidi` and
+:member:`ngtcp2_callbacks.extend_max_local_streams_uni` are called
+right after :member:`ngtcp2_callbacks.handshake_completed` callback if
+there are streams IDs available.
+
+For server, it can open streams after installing 1RTT TX(encryption)
+key, which is notified by :member:`ngtcp2_callbacks.recv_tx_key`.
+Note that handshake is not authenticated until handshake completes.
+Therefore, it is a good practice to send important data after
+handshake completion.
+
+Use `ngtcp2_conn_open_bidi_stream()` to open bidirectional
 stream.  For unidirectional stream, call
 `ngtcp2_conn_open_uni_stream()`.  Call `ngtcp2_conn_writev_stream()`
 to send stream data.
 
-If BBR congestion control algorithm is used, the additional API
-functions are required when sending QUIC packets.  BBR needs pacing
-packets.  `ngtcp2_conn_get_send_quantum()` returns the number of bytes
-that can be sent without packet spacing.  After one or more calls of
+An application should pace sending packets.
+`ngtcp2_conn_get_send_quantum()` returns the number of bytes that can
+be sent without packet spacing.  After one or more calls of
 `ngtcp2_conn_writev_stream()` (it can be called multiple times to fill
 the buffer sized up to `ngtcp2_conn_get_send_quantum()` bytes), call
 `ngtcp2_conn_update_pkt_tx_time()` to set the timer when the next
@@ -245,37 +268,87 @@ should send Version Negotiation packet.  Use
 `ngtcp2_pkt_write_version_negotiation()` for this purpose.  If
 `ngtcp2_pkt_decode_version_cid()` succeeds, then check whether the UDP
 datagram belongs to any existing connection by looking up connection
-tables by Destination Connection ID.  If it belongs to an existing
-connection, pass the UDP datagram to `ngtcp2_conn_read_pkt()`.  If it
-does not belong to any existing connection, it should be passed to
-`ngtcp2_accept()`.  If it returns :macro:`NGTCP2_ERR_RETRY`, the
-server should send Retry packet (use `ngtcp2_crypto_write_retry()` to
-create Retry packet).  If it returns an other negative error code,
-just drop the packet to the floor and take no action, or send
-Stateless Reset packet (use `ngtcp2_pkt_write_stateless_reset()` to
-create Stateless Reset packet).  Otherwise, the UDP datagram is
-acceptable as a new connection.  Create :type:`ngtcp2_conn` object and
-pass the UDP datagram to `ngtcp2_conn_read_pkt()`.
+tables by Destination Connection ID (refer to the next section to know
+how to associate Connection ID to a :type:`ngtcp2_conn`).  If it
+belongs to an existing connection, pass the UDP datagram to
+`ngtcp2_conn_read_pkt()`.  If it does not belong to any existing
+connection, it should be passed to `ngtcp2_accept()`.  If it returns a
+negative error code, just drop the packet to the floor and take no
+action, or send Stateless Reset packet (use
+`ngtcp2_pkt_write_stateless_reset()` to create Stateless Reset
+packet).  Otherwise, the UDP datagram is acceptable as a new
+connection.  Create :type:`ngtcp2_conn` object and pass the UDP
+datagram to `ngtcp2_conn_read_pkt()`.
 
-Dealing with early data
------------------------
+Associating Connection ID to ngtcp2_conn
+----------------------------------------
 
-Client application has to load resumed TLS session.  It also has to
-set the remembered transport parameters using
-`ngtcp2_conn_set_early_remote_transport_params()` function.
+Server needs to route an incoming UDP datagram to the correct
+:type:`ngtcp2_conn` by its Destination Connection ID.  When a UDP
+datagram is received, and it does not belong to any existing
+connections, and it is successfully processed by
+`ngtcp2_conn_read_pkt()`, associate the Destination Connection ID in
+the QUIC packet and :type:`ngtcp2_conn` object.  The server must
+associate the Connection IDs returned by `ngtcp2_conn_get_scid()` to
+the :type:`ngtcp2_conn` object as well.  When new Connection ID is
+asked by the library, :member:`ngtcp2_callbacks.get_new_connection_id`
+is called.  Inside the callback, associate the newly generated
+Connection ID to the :type:`ngtcp2_conn` object.
 
-Other than that, there is no difference between early data and 1RTT
-data in terms of API usage.
+When Connection ID is no longer used, its association should be
+removed.  When Connection ID is retired,
+:member:`ngtcp2_callbacks.remove_connection_id` is called.  Inside the
+callback, remove the association for the Connection ID.
 
-If early data is rejected by a server, client must call
-`ngtcp2_conn_early_data_rejected`.  All connection states altered
-during early data transmission are undone.  The library does not
-retransmit early data to server as 1RTT data.  If an application
+When a QUIC connection is closed, all associations for the connection
+should be removed.  Remove all associations for Connection ID returned
+from `ngtcp2_conn_get_scid()`.  Association for the initial Connection
+ID which can be obtained by calling
+`ngtcp2_conn_get_client_initial_dcid()` should also be removed.
+
+Dealing with 0-RTT (early) data
+-------------------------------
+
+Client application has to remember the subset of the QUIC transport
+parameters received from a server in the previous connection.
+`ngtcp2_conn_encode_0rtt_transport_params` returns the encoded QUIC
+transport parameters that include these values.  When sending 0-RTT
+data, the remembered transport parameters should be set via
+`ngtcp2_conn_decode_and_set_0rtt_transport_params`.  Then client can
+open streams with `ngtcp2_conn_open_bidi_streams` or
+`ngtcp2_conn_open_uni_stream`.  Note that
+`ngtcp2_conn_decode_and_set_0rtt_transport_params` does not invoke
+neither :member:`ngtcp2_callbacks.extend_max_local_streams_bidi` nor
+:member:`ngtcp2_callbacks.extend_max_local_streams_uni`.
+
+Other than that, there is no difference between 0-RTT and 1-RTT data
+in terms of API usage.
+
+If early data is rejected by a server during TLS handshake, client
+must call `ngtcp2_conn_tls_early_data_rejected`.  All connection
+states altered during 0-RTT transmission are undone.  The library does
+not retransmit 0-RTT data to server as 1-RTT data.  If an application
 wishes to resend data, it has to reopen streams and writes data again.
-See `ngtcp2_conn_early_data_rejected`.
+See `ngtcp2_conn_tls_early_data_rejected`.
+
+Closing streams
+---------------
+
+The send-side stream is closed when you call
+`ngtcp2_conn_writev_stream` with :macro:`NGTCP2_WRITE_STREAM_FLAG_FIN`
+flag set, and all data are acknowledged.  The receive-side stream is
+closed when a local endpoint receives fin from a remote endpoint, and
+all data are received.  And then
+:member:`ngtcp2_callbacks.stream_close` is invoked.
+
+Application can close stream abruptly by calling
+`ngtcp2_conn_shutdown_stream`.  It has
+`ngtcp2_conn_shutdown_stream_write` and
+`ngtcp2_conn_shutdown_stream_read` variants that close the individual
+side of a stream.
 
 Stream data ownership
---------------------------------
+---------------------
 
 Stream data passed to :type:`ngtcp2_conn` must be held by application
 until :member:`ngtcp2_callbacks.acked_stream_data_offset` callbacks is
@@ -295,15 +368,19 @@ clock should work better.  It should be same clock passed to
 is :type:`ngtcp2_duration` which is also nanosecond resolution.
 
 `ngtcp2_conn_get_expiry()` tells an application when timer fires.
-When timer fires, call `ngtcp2_conn_handle_expiry()` and
-`ngtcp2_conn_write_pkt()` (or `ngtcp2_conn_writev_stream()`).
+When it fires, call `ngtcp2_conn_handle_expiry()`.  If it returns
+:macro:`NGTCP2_ERR_IDLE_CLOSE`, it means that an idle timer has fired
+for this particular connection.  In this case, drop the connection
+without calling `ngtcp2_conn_write_connection_close()`.  Otherwise,
+call `ngtcp2_conn_writev_stream()`.  After calling
+`ngtcp2_conn_handle_expiry()` and `ngtcp2_conn_writev_stream()`, new
+expiry is set.  The application should call `ngtcp2_conn_get_expiry()`
+to get a new deadline.
 
-After calling these functions, new expiry will be set.  The
-application should call `ngtcp2_conn_get_expiry()` to restart timer.
-If `ngtcp2_conn_get_expiry()` returned :macro:`NGTCP2_ERR_IDLE_CLOSE`,
-it means that an idle timer has expired for this particular
-connection.  In this case, drop the connection without calling
-`ngtcp2_conn_write_connection_close()`.
+Please note that :type:`ngtcp2_tstamp` of value ``UINT64_MAX`` is
+treated as an invalid timestamp.  Do not pass ``UINT64_MAX`` to any
+ngtcp2 functions which take :type:`ngtcp2_tstamp` unless it is
+explicitly allowed.
 
 Connection migration
 --------------------
@@ -319,21 +396,46 @@ Closing connection abruptly
 
 In order to close QUIC connection abruptly, call
 `ngtcp2_conn_write_connection_close()` and get a terminal packet.
-Sending it closes the connection abruptly.
+After the call, the connection enters the closing state.
+
+The closing and draining state
+------------------------------
+
+After the successful call of `ngtcp2_conn_write_connection_close()`,
+the connection enters the closing state.  When
+`ngtcp2_conn_read_pkt()` returns :macro:`NGTCP2_ERR_DRAINING`, the
+connection has entered the draining state.  In these states,
+`ngtcp2_conn_writev_stream()` and `ngtcp2_conn_read_pkt()` return an
+error (either :macro:`NGTCP2_ERR_CLOSING` or
+:macro:`NGTCP2_ERR_DRAINING` depending on the state).
+`ngtcp2_conn_write_connection_close()` returns 0 in these states.  If
+an application needs to send a packet containing CONNECTION_CLOSE
+frame in the closing state, resend the packet produced by the first
+call of `ngtcp2_conn_write_connection_close()`.  Therefore, after a
+connection has entered one of these states, the application can
+discard :type:`ngtcp2_conn` object.  The closing and draining state
+should persist at least 3 times the current PTO.
 
 Error handling in general
 -------------------------
 
 In general, when error is returned from the ngtcp2 library function,
 call `ngtcp2_conn_write_connection_close()` to get terminal packet.
-Sending it finishes QUIC connection.
+If the successful call of the function creates non-empty packet, the
+QUIC connection enters the closing state.  Calling
+`ngtcp2_conn_read_pkt` or `ngtcp2_conn_writev_stream` after getting a
+negative error code is undefined except for the errors that are
+defined as transitional.  See below and their documentation.
 
 If :macro:`NGTCP2_ERR_DROP_CONN` is returned from
 `ngtcp2_conn_read_pkt`, a connection should be dropped without calling
 `ngtcp2_conn_write_connection_close()`.  Similarly, if
 :macro:`NGTCP2_ERR_IDLE_CLOSE` is returned from
 `ngtcp2_conn_handle_expiry`, a connection should be dropped without
-calling `ngtcp2_conn_write_connection_close()`.
+calling `ngtcp2_conn_write_connection_close()`.  If
+:macro:`NGTCP2_ERR_DRAINING` is returned from `ngtcp2_conn_read_pkt`,
+a connection has entered the draining state, and no further packet
+transmission is allowed.
 
 The following error codes must be considered as transitional, and
 application should keep connection alive:
@@ -351,36 +453,37 @@ Version negotiation is configured with the following
 
 * :member:`ngtcp2_settings.preferred_versions` and
   :member:`ngtcp2_settings.preferred_versionslen`
-* :member:`ngtcp2_settings.other_versions` and
-  :member:`ngtcp2_settings.other_versionslen`
+* :member:`ngtcp2_settings.available_versions` and
+  :member:`ngtcp2_settings.available_versionslen`
 * :member:`ngtcp2_settings.original_version`
 
 *client_chosen_version* passed to `ngtcp2_conn_client_new` also
 influence the version negotiation process.
 
 By default, client sends *client_chosen_version* passed to
-`ngtcp2_conn_client_new` in other_versions field of
+`ngtcp2_conn_client_new` in available_versions field of
 version_information QUIC transport parameter.  That means there is no
 chance for server to select the other compatible version.  Meanwhile,
-ngtcp2 supports QUIC v2 draft version
-(:macro:`NGTCP2_PROTO_VER_V2_DRAFT`).  Including both
-:macro:`NGTCP2_PROTO_VER_V1` and :macro:`NGTCP2_PROTO_VER_V2_DRAFT` in
-:member:`ngtcp2_settings.other_versions` field allows server to choose
-:macro:`NGTCP2_PROTO_VER_V2_DRAFT` which is compatible to
+ngtcp2 supports QUIC v2 version (:macro:`NGTCP2_PROTO_VER_V2`).
+Including both :macro:`NGTCP2_PROTO_VER_V1` and
+:macro:`NGTCP2_PROTO_VER_V2` in
+:member:`ngtcp2_settings.available_versions` field allows server to
+choose :macro:`NGTCP2_PROTO_VER_V2` which is compatible to
 :macro:`NGTCP2_PROTO_VER_V1`.
 
 By default, server sends :macro:`NGTCP2_PROTO_VER_V1` in
-other_versions field of version_information QUIC transport parameter.
-Because there is no particular preferred versions specified, server
-will accept any supported version.  In order to set the version
-preference, specify :member:`ngtcp2_settings.preferred_versions`
-field.  If it is specified, server sends them in other_versions field
-of version_information QUIC transport parameter unless
-:member:`ngtcp2_settings.other_versionslen` is not zero.  Specifying
-:member:`ngtcp2_settings.other_versions` overrides the above mentioned
-default behavior.  Even if there is no overlap between
-:member:`ngtcp2_settings.preferred_versions` and other_versions field
-plus *client_chosen_version* from client, as long as
+available_versions field of version_information QUIC transport
+parameter.  Because there is no particular preferred versions
+specified, server will accept any supported version.  In order to set
+the version preference, specify
+:member:`ngtcp2_settings.preferred_versions` field.  If it is
+specified, server sends them in available_versions field of
+version_information QUIC transport parameter unless
+:member:`ngtcp2_settings.available_versionslen` is not zero.
+Specifying :member:`ngtcp2_settings.available_versions` overrides the
+above mentioned default behavior.  Even if there is no overlap between
+:member:`ngtcp2_settings.preferred_versions` and available_versions
+field plus *client_chosen_version* from client, as long as
 *client_chosen_version* is supported by server, server accepts
 *client_chosen_version*.
 
@@ -397,7 +500,7 @@ in the first connection attempt must be set to
 preference that is used when selecting a version from Version
 Negotiation packet must be set to
 :member:`ngtcp2_settings.preferred_versions`.
-:member:`ngtcp2_settings.other_versions` must include the selected
+:member:`ngtcp2_settings.available_versions` must include the selected
 version.  The selected version becomes *client_chosen_version* in the
 second connection attempt, and must be passed to
 `ngtcp2_conn_client_new`.
@@ -405,3 +508,11 @@ second connection attempt, and must be passed to
 Server never know whether client reacted upon Version Negotiation
 packet or not, and there is no particular setup for server to make
 this incompatible version negotiation work.
+
+Thread safety
+-------------
+
+ngtcp2 library is thread-safe as long as a single :type:`ngtcp2_conn`
+object is accessed by a single thread at a time.  For multi-threaded
+applications, it is recommended to create :type:`ngtcp2_conn` objects
+per thread to avoid locks.

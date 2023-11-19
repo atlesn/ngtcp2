@@ -141,6 +141,10 @@ public:
 
   const std::vector<uint32_t> &get_offered_versions() const;
 
+  void early_data_rejected();
+
+  bool should_exit() const;
+
 private:
   std::vector<Endpoint> endpoints_;
   Address remote_addr_;
@@ -168,9 +172,6 @@ private:
   uint32_t original_version_;
   // early_data_ is true if client attempts to do 0RTT data transfer.
   bool early_data_;
-  // should_exit_ is true if client should exit rather than waiting
-  // for timeout.
-  bool should_exit_;
   // handshake_confirmed_ gets true after handshake has been
   // confirmed.
   bool handshake_confirmed_;

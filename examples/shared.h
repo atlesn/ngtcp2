@@ -40,35 +40,17 @@ namespace ngtcp2 {
 enum class AppProtocol {
   H3,
   HQ,
-  Perf,
 };
 
-constexpr uint8_t HQ_ALPN[] = "\xahq-interop\x5hq-29\x5hq-30\x5hq-31\x5hq-32";
-constexpr uint8_t HQ_ALPN_DRAFT29[] = "\x5hq-29";
-constexpr uint8_t HQ_ALPN_DRAFT30[] = "\x5hq-30";
-constexpr uint8_t HQ_ALPN_DRAFT31[] = "\x5hq-31";
-constexpr uint8_t HQ_ALPN_DRAFT32[] = "\x5hq-32";
+constexpr uint8_t HQ_ALPN[] = "\xahq-interop";
 constexpr uint8_t HQ_ALPN_V1[] = "\xahq-interop";
 
-constexpr uint8_t H3_ALPN[] = "\x2h3\x5h3-29\x5h3-30\x5h3-31\x5h3-32";
-constexpr uint8_t H3_ALPN_DRAFT29[] = "\x5h3-29";
-constexpr uint8_t H3_ALPN_DRAFT30[] = "\x5h3-30";
-constexpr uint8_t H3_ALPN_DRAFT31[] = "\x5h3-31";
-constexpr uint8_t H3_ALPN_DRAFT32[] = "\x5h3-32";
+constexpr uint8_t H3_ALPN[] = "\x2h3";
 constexpr uint8_t H3_ALPN_V1[] = "\x2h3";
-
-constexpr uint32_t QUIC_VER_DRAFT29 = 0xff00001du;
-constexpr uint32_t QUIC_VER_DRAFT30 = 0xff00001eu;
-constexpr uint32_t QUIC_VER_DRAFT31 = 0xff00001fu;
-constexpr uint32_t QUIC_VER_DRAFT32 = 0xff000020u;
 
 // msghdr_get_ecn gets ECN bits from |msg|.  |family| is the address
 // family from which packet is received.
 unsigned int msghdr_get_ecn(msghdr *msg, int family);
-
-// fd_set_ecn sets ECN bits |ecn| to |fd|.  |family| is the address
-// family of |fd|.
-void fd_set_ecn(int fd, int family, unsigned int ecn);
 
 // fd_set_recv_ecn sets socket option to |fd| so that it can receive
 // ECN bits.
@@ -81,7 +63,14 @@ void fd_set_ip_mtu_discover(int fd, int family);
 // fd_set_ip_dontfrag sets IP(V6)_DONTFRAG socket option to |fd|.
 void fd_set_ip_dontfrag(int fd, int family);
 
+// fd_set_udp_gro sets UDP_GRO socket option to |fd|.
+void fd_set_udp_gro(int fd);
+
 std::optional<Address> msghdr_get_local_addr(msghdr *msg, int family);
+
+// msghdr_get_udp_gro returns UDP_GRO value from |msg|.  If UDP_GRO is
+// not found, or UDP_GRO is not supported, this function returns 0.
+size_t msghdr_get_udp_gro(msghdr *msg);
 
 void set_port(Address &dst, Address &src);
 

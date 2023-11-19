@@ -29,9 +29,9 @@
 #  include <config.h>
 #endif // HAVE_CONFIG_H
 
-#if defined(ENABLE_EXAMPLE_OPENSSL) && defined(WITH_EXAMPLE_OPENSSL)
-#  include "tls_client_context_openssl.h"
-#endif // ENABLE_EXAMPLE_OPENSSL && WITH_EXAMPLE_OPENSSL
+#if defined(ENABLE_EXAMPLE_QUICTLS) && defined(WITH_EXAMPLE_QUICTLS)
+#  include "tls_client_context_quictls.h"
+#endif // ENABLE_EXAMPLE_QUICTLS && WITH_EXAMPLE_QUICTLS
 
 #if defined(ENABLE_EXAMPLE_GNUTLS) && defined(WITH_EXAMPLE_GNUTLS)
 #  include "tls_client_context_gnutls.h"
@@ -45,4 +45,8 @@
 #  include "tls_client_context_picotls.h"
 #endif // ENABLE_EXAMPLE_PICOTLS && WITH_EXAMPLE_PICOTLS
 
-#endif // TLS_CLIENT_CONTEXT_OPENSSL_H
+#if defined(ENABLE_EXAMPLE_WOLFSSL) && defined(WITH_EXAMPLE_WOLFSSL)
+#  include "tls_client_context_wolfssl.h"
+#endif // ENABLE_EXAMPLE_WOLFSSL && WITH_EXAMPLE_WOLFSSL
+
+#endif // TLS_CLIENT_CONTEXT_H

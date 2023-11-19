@@ -51,6 +51,7 @@ OBJECTS = \
 	ngtcp2_range.c \
 	ngtcp2_acktr.c \
 	ngtcp2_rtb.c \
+	ngtcp2_frame_chain.c \
 	ngtcp2_strm.c \
 	ngtcp2_idtr.c \
 	ngtcp2_gaptr.c \
@@ -61,7 +62,6 @@ OBJECTS = \
 	ngtcp2_ksl.c \
 	ngtcp2_cc.c \
 	ngtcp2_bbr.c \
-	ngtcp2_bbr2.c \
 	ngtcp2_addr.c \
 	ngtcp2_path.c \
 	ngtcp2_pv.c \
@@ -71,7 +71,9 @@ OBJECTS = \
 	ngtcp2_window_filter.c \
 	ngtcp2_opl.c \
 	ngtcp2_balloc.c \
-	ngtcp2_objalloc.c
+	ngtcp2_objalloc.c \
+	ngtcp2_unreachable.c \
+	ngtcp2_conversion.c
 
 HFILES = \
 	ngtcp2_pkt.h \
@@ -90,6 +92,7 @@ HFILES = \
 	ngtcp2_range.h \
 	ngtcp2_acktr.h \
 	ngtcp2_rtb.h \
+	ngtcp2_frame_chain.h \
 	ngtcp2_strm.h \
 	ngtcp2_idtr.h \
 	ngtcp2_gaptr.h \
@@ -100,7 +103,6 @@ HFILES = \
 	ngtcp2_ksl.h \
 	ngtcp2_cc.h \
 	ngtcp2_bbr.h \
-	ngtcp2_bbr2.h \
 	ngtcp2_addr.h \
 	ngtcp2_path.h \
 	ngtcp2_pv.h \
@@ -112,7 +114,12 @@ HFILES = \
 	ngtcp2_balloc.h \
 	ngtcp2_objalloc.h \
 	ngtcp2_rcvry.h \
-	ngtcp2_net.h
+	ngtcp2_net.h \
+	ngtcp2_unreachable.h \
+	ngtcp2_conversion.h \
+	ngtcp2_conn_stat.h \
+	ngtcp2_pktns_id.h \
+	ngtcp2_tstamp.h
 
 libngtcp2_la_SOURCES = $(HFILES) $(OBJECTS)
 libngtcp2_la_LDFLAGS = -no-undefined \

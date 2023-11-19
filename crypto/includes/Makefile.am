@@ -25,7 +25,7 @@ EXTRA_DIST = CMakeLists.txt
 nobase_include_HEADERS = ngtcp2/ngtcp2_crypto.h
 
 if HAVE_OPENSSL
-nobase_include_HEADERS += ngtcp2/ngtcp2_crypto_openssl.h
+nobase_include_HEADERS += ngtcp2/ngtcp2_crypto_quictls.h
 endif
 
 if HAVE_GNUTLS
@@ -38,4 +38,8 @@ endif
 
 if HAVE_PICOTLS
 nobase_include_HEADERS += ngtcp2/ngtcp2_crypto_picotls.h
+endif
+
+if HAVE_WOLFSSL
+nobase_include_HEADERS += ngtcp2/ngtcp2_crypto_wolfssl.h
 endif

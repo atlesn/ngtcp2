@@ -65,11 +65,12 @@ endif()
 
 if(ENABLE_STATIC_LIB)
   # Public static library
-  add_library(ngtcp2_crypto_gnutls_static ${ngtcp2_crypto_gnutls_SOURCES})
+  add_library(ngtcp2_crypto_gnutls_static STATIC ${ngtcp2_crypto_gnutls_SOURCES})
   set_target_properties(ngtcp2_crypto_gnutls_static PROPERTIES
     COMPILE_FLAGS "${WARNCFLAGS}"
     VERSION ${CRYPTO_GNUTLS_LT_VERSION}
     SOVERSION ${CRYPTO_GNUTLS_LT_SOVERSION}
+    ARCHIVE_OUTPUT_NAME ngtcp2_crypto_gnutls${STATIC_LIB_SUFFIX}
     C_VISIBILITY_PRESET hidden
   )
   target_compile_definitions(ngtcp2_crypto_gnutls_static PUBLIC

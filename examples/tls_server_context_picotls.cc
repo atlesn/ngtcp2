@@ -30,15 +30,19 @@
 #include <ngtcp2/ngtcp2_crypto_picotls.h>
 
 #include <openssl/pem.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#  include <openssl/core_names.h>
+#endif // OPENSSL_VERSION_NUMBER >= 0x30000000L
 
 #include "server_base.h"
+#include "tls_shared_picotls.h"
 #include "template.h"
 
 extern Config config;
 
 namespace {
-int on_client_hello_cb(ptls_on_client_hello_t *self, ptls_t *ptls,
-                       ptls_on_client_hello_parameters_t *params) {
+int on_client_hello_h3_cb(ptls_on_client_hello_t *self, ptls_t *ptls,
+                          ptls_on_client_hello_parameters_t *params) {
   auto &negprotos = params->negotiated_protocols;
 
   for (size_t i = 0; i < negprotos.count; ++i) {
@@ -57,7 +61,31 @@ int on_client_hello_cb(ptls_on_client_hello_t *self, ptls_t *ptls,
   return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
 
-ptls_on_client_hello_t on_client_hello = {on_client_hello_cb};
+ptls_on_client_hello_t on_client_hello_h3 = {on_client_hello_h3_cb};
+} // namespace
+
+namespace {
+int on_client_hello_hq_cb(ptls_on_client_hello_t *self, ptls_t *ptls,
+                          ptls_on_client_hello_parameters_t *params) {
+  auto &negprotos = params->negotiated_protocols;
+
+  for (size_t i = 0; i < negprotos.count; ++i) {
+    auto &proto = negprotos.list[i];
+    if (HQ_ALPN_V1[0] == proto.len &&
+        memcmp(&HQ_ALPN_V1[1], proto.base, proto.len) == 0) {
+      if (ptls_set_negotiated_protocol(
+              ptls, reinterpret_cast<char *>(proto.base), proto.len) != 0) {
+        return -1;
+      }
+
+      return 0;
+    }
+  }
+
+  return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
+}
+
+ptls_on_client_hello_t on_client_hello_hq = {on_client_hello_hq_cb};
 } // namespace
 
 namespace {
@@ -88,7 +116,13 @@ const std::array<uint8_t, 32> &get_ticket_hmac_key() {
 
 namespace {
 int ticket_key_cb(unsigned char *key_name, unsigned char *iv,
-                  EVP_CIPHER_CTX *ctx, HMAC_CTX *hctx, int enc) {
+                  EVP_CIPHER_CTX *ctx,
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+                  EVP_MAC_CTX *hctx,
+#else  // OPENSSL_VERSION_NUMBER < 0x30000000L
+                  HMAC_CTX *hctx,
+#endif // OPENSSL_VERSION_NUMBER < 0x30000000L
+                  int enc) {
   static const auto &static_key_name = get_ticket_key_name();
   static const auto &static_key = get_ticket_key();
   static const auto &static_hmac_key = get_ticket_hmac_key();
@@ -98,9 +132,30 @@ int ticket_key_cb(unsigned char *key_name, unsigned char *iv,
 
     memcpy(key_name, static_key_name.data(), static_key_name.size());
 
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, static_key.data(), iv);
-    HMAC_Init_ex(hctx, static_hmac_key.data(), static_hmac_key.size(),
-                 ticket_hmac, nullptr);
+    if (!EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, static_key.data(),
+                            iv)) {
+      return 0;
+    }
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    std::array<OSSL_PARAM, 3> params{
+        OSSL_PARAM_construct_octet_string(
+            OSSL_MAC_PARAM_KEY, const_cast<uint8_t *>(static_hmac_key.data()),
+            static_hmac_key.size()),
+        OSSL_PARAM_construct_utf8_string(
+            OSSL_MAC_PARAM_DIGEST,
+            const_cast<char *>(EVP_MD_get0_name(ticket_hmac)), 0),
+        OSSL_PARAM_construct_end(),
+    };
+    if (!EVP_MAC_CTX_set_params(hctx, params.data())) {
+      /* TODO Which value should we return on error? */
+      return 0;
+    }
+#else  // OPENSSL_VERSION_NUMBER < 0x30000000L
+    if (!HMAC_Init_ex(hctx, static_hmac_key.data(), static_hmac_key.size(),
+                      ticket_hmac, nullptr)) {
+      return 0;
+    }
+#endif // OPENSSL_VERSION_NUMBER < 0x30000000L
 
     return 1;
   }
@@ -109,9 +164,30 @@ int ticket_key_cb(unsigned char *key_name, unsigned char *iv,
     return 0;
   }
 
-  EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, static_key.data(), iv);
-  HMAC_Init_ex(hctx, static_hmac_key.data(), static_hmac_key.size(),
-               ticket_hmac, nullptr);
+  if (!EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, static_key.data(),
+                          iv)) {
+    return 0;
+  }
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+  std::array<OSSL_PARAM, 3> params{
+      OSSL_PARAM_construct_octet_string(
+          OSSL_MAC_PARAM_KEY, const_cast<uint8_t *>(static_hmac_key.data()),
+          static_hmac_key.size()),
+      OSSL_PARAM_construct_utf8_string(
+          OSSL_MAC_PARAM_DIGEST,
+          const_cast<char *>(EVP_MD_get0_name(ticket_hmac)), 0),
+      OSSL_PARAM_construct_end(),
+  };
+  if (!EVP_MAC_CTX_set_params(hctx, params.data())) {
+    /* TODO Which value should we return on error? */
+    return 0;
+  }
+#else  // OPENSSL_VERSION_NUMBER < 0x30000000L
+  if (!HMAC_Init_ex(hctx, static_hmac_key.data(), static_hmac_key.size(),
+                    ticket_hmac, nullptr)) {
+    return 0;
+  }
+#endif // OPENSSL_VERSION_NUMBER < 0x30000000L
 
   return 1;
 }
@@ -121,9 +197,27 @@ namespace {
 int encrypt_ticket_cb(ptls_encrypt_ticket_t *encrypt_ticket, ptls_t *ptls,
                       int is_encrypt, ptls_buffer_t *dst, ptls_iovec_t src) {
   int rv;
+  auto conn_ref =
+      static_cast<ngtcp2_crypto_conn_ref *>(*ptls_get_data_ptr(ptls));
+  auto conn = conn_ref->get_conn(conn_ref);
+  uint32_t ver;
 
   if (is_encrypt) {
+    ver = htonl(ngtcp2_conn_get_negotiated_version(conn));
+    // TODO Replace std::make_unique with
+    // std::make_unique_for_overwrite when it is available.
+    auto buf = std::make_unique<uint8_t[]>(src.len + sizeof(ver));
+    auto p = std::copy_n(src.base, src.len, buf.get());
+    p = std::copy_n(reinterpret_cast<uint8_t *>(&ver), sizeof(ver), p);
+
+    src.base = buf.get();
+    src.len = p - buf.get();
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    rv = ptls_openssl_encrypt_ticket_evp(dst, src, ticket_key_cb);
+#else  // OPENSSL_VERSION_NUMBER < 0x30000000L
     rv = ptls_openssl_encrypt_ticket(dst, src, ticket_key_cb);
+#endif // OPENSSL_VERSION_NUMBER < 0x30000000L
     if (rv != 0) {
       return -1;
     }
@@ -131,10 +225,26 @@ int encrypt_ticket_cb(ptls_encrypt_ticket_t *encrypt_ticket, ptls_t *ptls,
     return 0;
   }
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+  rv = ptls_openssl_decrypt_ticket_evp(dst, src, ticket_key_cb);
+#else  // OPENSSL_VERSION_NUMBER < 0x30000000L
   rv = ptls_openssl_decrypt_ticket(dst, src, ticket_key_cb);
+#endif // OPENSSL_VERSION_NUMBER < 0x30000000L
   if (rv != 0) {
     return -1;
   }
+
+  if (dst->off < sizeof(ver)) {
+    return -1;
+  }
+
+  memcpy(&ver, dst->base + dst->off - sizeof(ver), sizeof(ver));
+
+  if (ngtcp2_conn_get_client_chosen_version(conn) != ntohl(ver)) {
+    return -1;
+  }
+
+  dst->off -= sizeof(ver);
 
   return 0;
 }
@@ -167,7 +277,6 @@ TLSServerContext::TLSServerContext()
           .get_time = &ptls_get_time,
           .key_exchanges = key_exchanges,
           .cipher_suites = cipher_suites,
-          .on_client_hello =  &on_client_hello,
           .ticket_lifetime = 86400,
           .require_dhe_on_psk = 1,
           .server_cipher_preference = 1,
@@ -191,6 +300,17 @@ ptls_context_t *TLSServerContext::get_native_handle() { return &ctx_; }
 
 int TLSServerContext::init(const char *private_key_file, const char *cert_file,
                            AppProtocol app_proto) {
+  switch (app_proto) {
+  case AppProtocol::H3:
+    ctx_.on_client_hello = &on_client_hello_h3;
+
+    break;
+  case AppProtocol::HQ:
+    ctx_.on_client_hello = &on_client_hello_hq;
+
+    break;
+  };
+
   if (ngtcp2_crypto_picotls_configure_server_context(&ctx_) != 0) {
     std::cerr << "ngtcp2_crypto_picotls_configure_server_context failed"
               << std::endl;
@@ -241,3 +361,5 @@ int TLSServerContext::load_private_key(const char *private_key_file) {
 
   return 0;
 }
+
+void TLSServerContext::enable_keylog() { ctx_.log_event = &log_event; }

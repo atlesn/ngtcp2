@@ -24,6 +24,8 @@
  */
 #include "ngtcp2_str_test.h"
 
+#include <stdio.h>
+
 #include <CUnit/CUnit.h>
 
 #include "ngtcp2_str.h"
@@ -85,4 +87,12 @@ void test_ngtcp2_encode_ipv6(void) {
              (const char *)ngtcp2_encode_ipv6(
                  buf, (const uint8_t *)"\x00\x00\x00\x00\x00\x00\x00\x00\x00"
                                        "\x00\x00\x00\x00\x00\x00\x00")));
+}
+
+void test_ngtcp2_get_bytes(void) {
+  const uint8_t src[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+  uint8_t dest[256];
+
+  CU_ASSERT(src + sizeof(src) == ngtcp2_get_bytes(dest, src, sizeof(src)));
+  CU_ASSERT(0 == memcmp(src, dest, sizeof(src)));
 }

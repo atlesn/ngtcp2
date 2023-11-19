@@ -32,12 +32,19 @@
 #include <openssl/pem.h>
 
 #include "client_base.h"
+#include "tls_shared_picotls.h"
 #include "template.h"
 
 extern Config config;
 
 namespace {
 int save_ticket_cb(ptls_save_ticket_t *self, ptls_t *ptls, ptls_iovec_t input) {
+  auto conn_ref =
+      static_cast<ngtcp2_crypto_conn_ref *>(*ptls_get_data_ptr(ptls));
+  auto c = static_cast<ClientBase *>(conn_ref->user_data);
+
+  c->ticket_received();
+
   auto f = BIO_new_file(config.session_file, "w");
   if (f == nullptr) {
     std::cerr << "Could not write TLS session in " << config.session_file
@@ -45,7 +52,11 @@ int save_ticket_cb(ptls_save_ticket_t *self, ptls_t *ptls, ptls_iovec_t input) {
     return 0;
   }
 
-  PEM_write_bio(f, "PICOTLS SESSION PARAMETERS", "", input.base, input.len);
+  if (!PEM_write_bio(f, "PICOTLS SESSION PARAMETERS", "", input.base,
+                     input.len)) {
+    std::cerr << "Unable to write TLS session to file" << std::endl;
+  }
+
   BIO_free(f);
 
   return 0;
@@ -80,7 +91,7 @@ TLSClientContext::TLSClientContext()
           .key_exchanges = key_exchanges,
           .cipher_suites = cipher_suites,
           .require_dhe_on_psk = 1,
-      } {}
+      }, sign_cert_{} {}
 
 TLSClientContext::~TLSClientContext() {
   if (sign_cert_.key) {
@@ -149,3 +160,5 @@ int TLSClientContext::load_private_key(const char *private_key_file) {
 
   return 0;
 }
+
+void TLSClientContext::enable_keylog() { ctx_.log_event = &log_event; }

@@ -142,14 +142,18 @@ struct Config {
   // preference.  Server negotiates one of those versions if a client
   // initially selects a less preferred version.
   std::vector<uint32_t> preferred_versions;
-  // other_versions includes QUIC versions that are sent in
-  // other_versions field of version_information transport_parameter.
-  std::vector<uint32_t> other_versions;
+  // available_versions includes QUIC versions that are sent in
+  // available_versions field of version_information
+  // transport_parameter.
+  std::vector<uint32_t> available_versions;
   // no_pmtud disables Path MTU Discovery.
   bool no_pmtud;
-  // ack_thresh is the maximum number of unacknowledged packets before sending
-  // acknowledgement. It triggers the immediate acknowledgement.
+  // ack_thresh is the minimum number of the received ACK eliciting
+  // packets that triggers immediate acknowledgement.
   size_t ack_thresh;
+  // initial_pkt_num is the initial packet number for each packet
+  // number space.  If it is set to UINT32_MAX, it is chosen randomly.
+  uint32_t initial_pkt_num;
 };
 
 struct Buffer {
@@ -188,7 +192,7 @@ protected:
   ngtcp2_crypto_conn_ref conn_ref_;
   TLSServerSession tls_session_;
   ngtcp2_conn *conn_;
-  ngtcp2_connection_close_error last_error_;
+  ngtcp2_ccerr last_error_;
 };
 
 #endif // SERVER_BASE_H

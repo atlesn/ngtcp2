@@ -43,6 +43,7 @@ set(ngtcp2_SOURCES
   ngtcp2_range.c
   ngtcp2_acktr.c
   ngtcp2_rtb.c
+  ngtcp2_frame_chain.c
   ngtcp2_strm.c
   ngtcp2_idtr.c
   ngtcp2_gaptr.c
@@ -53,7 +54,6 @@ set(ngtcp2_SOURCES
   ngtcp2_ksl.c
   ngtcp2_cc.c
   ngtcp2_bbr.c
-  ngtcp2_bbr2.c
   ngtcp2_addr.c
   ngtcp2_path.c
   ngtcp2_pv.c
@@ -64,6 +64,8 @@ set(ngtcp2_SOURCES
   ngtcp2_opl.c
   ngtcp2_balloc.c
   ngtcp2_objalloc.c
+  ngtcp2_unreachable.c
+  ngtcp2_conversion.c
 )
 
 set(ngtcp2_INCLUDE_DIRS
@@ -94,6 +96,7 @@ if(HAVE_CUNIT OR ENABLE_STATIC_LIB)
   set_target_properties(ngtcp2_static PROPERTIES
     COMPILE_FLAGS "${WARNCFLAGS}"
     VERSION ${LT_VERSION} SOVERSION ${LT_SOVERSION}
+    ARCHIVE_OUTPUT_NAME ngtcp2${STATIC_LIB_SUFFIX}
     C_VISIBILITY_PRESET hidden
   )
   target_compile_definitions(ngtcp2_static PUBLIC "-DNGTCP2_STATICLIB")

@@ -56,28 +56,12 @@ int TLSClientSession::init(bool &early_data_enabled,
   SSL_set_app_data(ssl_, client->conn_ref());
   SSL_set_connect_state(ssl_);
 
-  if ((quic_version & 0xff000000) == 0xff000000) {
-    SSL_set_quic_use_legacy_codepoint(ssl_, 1);
-  } else {
-    SSL_set_quic_use_legacy_codepoint(ssl_, 0);
-  }
-
   switch (app_proto) {
-  case AppProtocol::H3: {
-    auto alpn = reinterpret_cast<const uint8_t *>(H3_ALPN);
-    auto alpnlen = str_size(H3_ALPN);
-    SSL_set_alpn_protos(ssl_, alpn, alpnlen);
+  case AppProtocol::H3:
+    SSL_set_alpn_protos(ssl_, H3_ALPN, str_size(H3_ALPN));
     break;
-  }
-  case AppProtocol::HQ: {
-    auto alpn = reinterpret_cast<const uint8_t *>(HQ_ALPN);
-    auto alpnlen = str_size(HQ_ALPN);
-    SSL_set_alpn_protos(ssl_, alpn, alpnlen);
-    break;
-  }
-  case AppProtocol::Perf:
-    /* TODO Not implemented yet */
-    assert(0);
+  case AppProtocol::HQ:
+    SSL_set_alpn_protos(ssl_, HQ_ALPN, str_size(HQ_ALPN));
     break;
   }
 

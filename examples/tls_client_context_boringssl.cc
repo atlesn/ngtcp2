@@ -24,6 +24,7 @@
  */
 #include "tls_client_context_boringssl.h"
 
+#include <cstring>
 #include <iostream>
 #include <fstream>
 
@@ -48,6 +49,11 @@ SSL_CTX *TLSClientContext::get_native_handle() const { return ssl_ctx_; }
 
 namespace {
 int new_session_cb(SSL *ssl, SSL_SESSION *session) {
+  auto conn_ref = static_cast<ngtcp2_crypto_conn_ref *>(SSL_get_app_data(ssl));
+  auto c = static_cast<ClientBase *>(conn_ref->user_data);
+
+  c->ticket_received();
+
   auto f = BIO_new_file(config.session_file, "w");
   if (f == nullptr) {
     std::cerr << "Could not write TLS session in " << config.session_file
@@ -55,7 +61,10 @@ int new_session_cb(SSL *ssl, SSL_SESSION *session) {
     return 0;
   }
 
-  PEM_write_bio_SSL_SESSION(f, session);
+  if (!PEM_write_bio_SSL_SESSION(f, session)) {
+    std::cerr << "Unable to write TLS session to file" << std::endl;
+  }
+
   BIO_free(f);
 
   return 0;
@@ -79,8 +88,8 @@ int TLSClientContext::init(const char *private_key_file,
 
   SSL_CTX_set_default_verify_paths(ssl_ctx_);
 
-  if (SSL_CTX_set1_curves_list(ssl_ctx_, config.groups) != 1) {
-    std::cerr << "SSL_CTX_set1_curves_list failed" << std::endl;
+  if (SSL_CTX_set1_groups_list(ssl_ctx_, config.groups) != 1) {
+    std::cerr << "SSL_CTX_set1_groups_list failed" << std::endl;
     return -1;
   }
 

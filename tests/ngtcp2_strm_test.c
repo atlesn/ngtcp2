@@ -24,11 +24,14 @@
  */
 #include "ngtcp2_strm_test.h"
 
+#include <stdio.h>
+
 #include <CUnit/CUnit.h>
 
 #include "ngtcp2_strm.h"
 #include "ngtcp2_test_helper.h"
 #include "ngtcp2_vec.h"
+#include "ngtcp2_frame_chain.h"
 
 static uint8_t nulldata[1024];
 

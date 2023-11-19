@@ -42,6 +42,7 @@
 #include <sys/mman.h>
 #include <netinet/udp.h>
 #include <net/if.h>
+#include <libgen.h>
 
 #include <http-parser/http_parser.h>
 
@@ -78,12 +79,12 @@ Stream::Stream(int64_t stream_id, Handler *handler)
 }
 
 namespace {
-constexpr char NGTCP2_SERVER[] = "ngtcp2 server";
+constexpr auto NGTCP2_SERVER = "ngtcp2 server"sv;
 } // namespace
 
 namespace {
 std::string make_status_body(unsigned int status_code) {
-  auto status_string = std::to_string(status_code);
+  auto status_string = util::format_uint(status_code);
   auto reason_phrase = http::get_reason_phrase(status_code);
 
   std::string body;
@@ -98,7 +99,7 @@ std::string make_status_body(unsigned int status_code) {
   body += "</h1><hr><address>";
   body += NGTCP2_SERVER;
   body += " at port ";
-  body += std::to_string(config.port);
+  body += util::format_uint(config.port);
   body += "</address>";
   body += "</body></html>";
   return body;
@@ -107,19 +108,12 @@ std::string make_status_body(unsigned int status_code) {
 
 struct Request {
   std::string path;
-  struct {
-    int32_t urgency;
-    int inc;
-  } pri;
 };
 
 namespace {
 Request request_path(const std::string_view &uri) {
   http_parser_url u;
   Request req;
-
-  req.pri.urgency = -1;
-  req.pri.inc = -1;
 
   http_parser_url_init(&u);
 
@@ -147,48 +141,6 @@ Request request_path(const std::string_view &uri) {
     req.path = "/index.html";
   }
 
-  if (u.field_set & (1 << UF_QUERY)) {
-    static constexpr char urgency_prefix[] = "u=";
-    static constexpr char inc_prefix[] = "i=";
-    auto q = std::string(uri.data() + u.field_data[UF_QUERY].off,
-                         u.field_data[UF_QUERY].len);
-    for (auto p = std::begin(q); p != std::end(q);) {
-      if (util::istarts_with(p, std::end(q), std::begin(urgency_prefix),
-                             std::end(urgency_prefix) - 1)) {
-        auto urgency_start = p + sizeof(urgency_prefix) - 1;
-        auto urgency_end = std::find(urgency_start, std::end(q), '&');
-        if (urgency_start + 1 == urgency_end && '0' <= *urgency_start &&
-            *urgency_start <= '7') {
-          req.pri.urgency = *urgency_start - '0';
-        }
-        if (urgency_end == std::end(q)) {
-          break;
-        }
-        p = urgency_end + 1;
-        continue;
-      }
-      if (util::istarts_with(p, std::end(q), std::begin(inc_prefix),
-                             std::end(inc_prefix) - 1)) {
-        auto inc_start = p + sizeof(inc_prefix) - 1;
-        auto inc_end = std::find(inc_start, std::end(q), '&');
-        if (inc_start + 1 == inc_end &&
-            (*inc_start == '0' || *inc_start == '1')) {
-          req.pri.inc = *inc_start - '0';
-        }
-        if (inc_end == std::end(q)) {
-          break;
-        }
-        p = inc_end + 1;
-        continue;
-      }
-
-      p = std::find(p, std::end(q), '&');
-      if (p == std::end(q)) {
-        break;
-      }
-      ++p;
-    }
-  }
   return req;
 }
 } // namespace
@@ -290,7 +242,7 @@ int Stream::start_response() {
 
   if (!config.quiet) {
     std::array<nghttp3_nv, 1> nva{
-        util::make_nv(":status", "200"),
+        util::make_nv_nn(":status", "200"),
     };
 
     debug::print_http_response_headers(stream_id, nva.data(), nva.size());
@@ -322,7 +274,7 @@ void close_waitcb(struct ev_loop *loop, ev_timer *w, int revents) {
   auto s = h->server();
   auto conn = h->conn();
 
-  if (ngtcp2_conn_is_in_closing_period(conn)) {
+  if (ngtcp2_conn_in_closing_period(conn)) {
     if (!config.quiet) {
       std::cerr << "Closing Period is over" << std::endl;
     }
@@ -330,7 +282,7 @@ void close_waitcb(struct ev_loop *loop, ev_timer *w, int revents) {
     s->remove(h);
     return;
   }
-  if (ngtcp2_conn_is_in_draining_period(conn)) {
+  if (ngtcp2_conn_in_draining_period(conn)) {
     if (!config.quiet) {
       std::cerr << "Draining Period is over" << std::endl;
     }
@@ -482,14 +434,14 @@ int do_hp_mask(uint8_t *dest, const ngtcp2_crypto_cipher *hp,
 } // namespace
 
 namespace {
-int recv_crypto_data(ngtcp2_conn *conn, ngtcp2_crypto_level crypto_level,
-                     uint64_t offset, const uint8_t *data, size_t datalen,
-                     void *user_data) {
+int recv_crypto_data(ngtcp2_conn *conn,
+                     ngtcp2_encryption_level encryption_level, uint64_t offset,
+                     const uint8_t *data, size_t datalen, void *user_data) {
   if (!config.quiet && !config.no_quic_dump) {
-    debug::print_crypto_data(crypto_level, data, datalen);
+    debug::print_crypto_data(encryption_level, data, datalen);
   }
 
-  return ngtcp2_crypto_recv_crypto_data_cb(conn, crypto_level, offset, data,
+  return ngtcp2_crypto_recv_crypto_data_cb(conn, encryption_level, offset, data,
                                            datalen, user_data);
 }
 } // namespace
@@ -564,8 +516,33 @@ int stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
 } // namespace
 
 namespace {
+int stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
+                 uint64_t app_error_code, void *user_data,
+                 void *stream_user_data) {
+  auto h = static_cast<Handler *>(user_data);
+  if (h->on_stream_reset(stream_id) != 0) {
+    return NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+  return 0;
+}
+} // namespace
+
+int Handler::on_stream_reset(int64_t stream_id) {
+  if (ngtcp2_is_bidi_stream(stream_id)) {
+    if (auto rv = ngtcp2_conn_shutdown_stream_write(conn_, 0, stream_id, 0);
+        rv != 0) {
+      std::cerr << "ngtcp2_conn_shutdown_stream_write: " << ngtcp2_strerror(rv)
+                << std::endl;
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+namespace {
 void rand(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_ctx) {
-  auto dis = std::uniform_int_distribution<uint8_t>(0, 255);
+  auto dis = std::uniform_int_distribution<uint8_t>();
   std::generate(dest, dest + destlen, [&dis]() { return dis(randgen); });
 }
 } // namespace
@@ -619,10 +596,43 @@ int update_key(ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
 
 namespace {
 int path_validation(ngtcp2_conn *conn, uint32_t flags, const ngtcp2_path *path,
+                    const ngtcp2_path *old_path,
                     ngtcp2_path_validation_result res, void *user_data) {
   if (!config.quiet) {
     debug::path_validation(path, res);
   }
+
+  if (res != NGTCP2_PATH_VALIDATION_RESULT_SUCCESS ||
+      !(flags & NGTCP2_PATH_VALIDATION_FLAG_NEW_TOKEN)) {
+    return 0;
+  }
+
+  std::array<uint8_t, NGTCP2_CRYPTO_MAX_REGULAR_TOKENLEN> token;
+  auto t = std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+               .count();
+
+  auto tokenlen = ngtcp2_crypto_generate_regular_token(
+      token.data(), config.static_secret.data(), config.static_secret.size(),
+      path->remote.addr, path->remote.addrlen, t);
+  if (tokenlen < 0) {
+    if (!config.quiet) {
+      std::cerr << "Unable to generate token" << std::endl;
+    }
+
+    return 0;
+  }
+
+  if (auto rv = ngtcp2_conn_submit_new_token(conn, token.data(), tokenlen);
+      rv != 0) {
+    if (!config.quiet) {
+      std::cerr << "ngtcp2_conn_submit_new_token: " << ngtcp2_strerror(rv)
+                << std::endl;
+    }
+
+    return NGTCP2_ERR_CALLBACK_FAILURE;
+  }
+
   return 0;
 }
 } // namespace
@@ -667,7 +677,8 @@ void Handler::write_qlog(const void *data, size_t datalen) {
 int Handler::init(const Endpoint &ep, const Address &local_addr,
                   const sockaddr *sa, socklen_t salen, const ngtcp2_cid *dcid,
                   const ngtcp2_cid *scid, const ngtcp2_cid *ocid,
-                  const uint8_t *token, size_t tokenlen, uint32_t version,
+                  const uint8_t *token, size_t tokenlen,
+                  ngtcp2_token_type token_type, uint32_t version,
                   TLSServerContext &tls_ctx) {
   auto callbacks = ngtcp2_callbacks{
       nullptr, // client_initial
@@ -684,15 +695,15 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
       stream_close,
       nullptr, // recv_stateless_reset
       nullptr, // recv_retry
-      nullptr, // extend_max_streams_bidi
-      nullptr, // extend_max_streams_uni
+      nullptr, // extend_max_local_streams_bidi
+      nullptr, // extend_max_local_streams_uni
       rand,
       get_new_connection_id,
       remove_connection_id,
       ::update_key,
       path_validation,
       nullptr, // select_preferred_addr
-      nullptr, // stream_reset
+      ::stream_reset,
       nullptr, // extend_max_remote_streams_bidi
       nullptr, // extend_max_remote_streams_uni
       ::extend_max_stream_data,
@@ -720,16 +731,20 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   ngtcp2_settings settings;
   ngtcp2_settings_default(&settings);
   settings.log_printf = config.quiet ? nullptr : debug::log_printf;
-  settings.initial_ts = util::timestamp(loop_);
-  settings.token = ngtcp2_vec{const_cast<uint8_t *>(token), tokenlen};
+  settings.initial_ts = util::timestamp();
+  settings.token = token;
+  settings.tokenlen = tokenlen;
+  settings.token_type = token_type;
   settings.cc_algo = config.cc_algo;
   settings.initial_rtt = config.initial_rtt;
+  settings.max_window = config.max_window;
+  settings.max_stream_window = config.max_stream_window;
   settings.handshake_timeout = config.handshake_timeout;
   settings.no_pmtud = config.no_pmtud;
   settings.ack_thresh = config.ack_thresh;
   if (config.max_udp_payload_size) {
-    settings.max_udp_payload_size = config.max_udp_payload_size;
-    settings.no_udp_payload_size_shaping = 1;
+    settings.max_tx_udp_payload_size = config.max_udp_payload_size;
+    settings.no_tx_udp_payload_size_shaping = 1;
   }
   if (!config.qlog_dir.empty()) {
     auto path = std::string{config.qlog_dir};
@@ -742,16 +757,21 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
                 << strerror(errno) << std::endl;
       return -1;
     }
-    settings.qlog.write = ::write_qlog;
-    settings.qlog.odcid = *scid;
+    settings.qlog_write = ::write_qlog;
   }
   if (!config.preferred_versions.empty()) {
     settings.preferred_versions = config.preferred_versions.data();
     settings.preferred_versionslen = config.preferred_versions.size();
   }
-  if (!config.other_versions.empty()) {
-    settings.other_versions = config.other_versions.data();
-    settings.other_versionslen = config.other_versions.size();
+  if (!config.available_versions.empty()) {
+    settings.available_versions = config.available_versions.data();
+    settings.available_versionslen = config.available_versions.size();
+  }
+  if (config.initial_pkt_num == UINT32_MAX) {
+    auto dis = std::uniform_int_distribution<uint32_t>(0, INT32_MAX);
+    settings.initial_pkt_num = dis(randgen);
+  } else {
+    settings.initial_pkt_num = config.initial_pkt_num;
   }
 
   ngtcp2_transport_params params;
@@ -766,6 +786,7 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   params.max_idle_timeout = config.timeout;
   params.stateless_reset_token_present = 1;
   params.active_connection_id_limit = 7;
+  params.grease_quic_bit = 1;
 
   if (ocid) {
     params.original_dcid = *ocid;
@@ -775,6 +796,8 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
     params.original_dcid = *scid;
   }
 
+  params.original_dcid_present = 1;
+
   if (util::generate_secure_random(params.stateless_reset_token,
                                    sizeof(params.stateless_reset_token)) != 0) {
     std::cerr << "Could not generate stateless reset token" << std::endl;
@@ -782,35 +805,28 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
   }
 
   if (config.preferred_ipv4_addr.len || config.preferred_ipv6_addr.len) {
-    params.preferred_address_present = 1;
+    params.preferred_addr_present = 1;
+
     if (config.preferred_ipv4_addr.len) {
-      auto &dest = params.preferred_address.ipv4_addr;
-      const auto &addr = config.preferred_ipv4_addr;
-      assert(sizeof(dest) == sizeof(addr.su.in.sin_addr));
-      memcpy(&dest, &addr.su.in.sin_addr, sizeof(dest));
-      params.preferred_address.ipv4_port = htons(addr.su.in.sin_port);
-      params.preferred_address.ipv4_present = 1;
-    }
-    if (config.preferred_ipv6_addr.len) {
-      auto &dest = params.preferred_address.ipv6_addr;
-      const auto &addr = config.preferred_ipv6_addr;
-      assert(sizeof(dest) == sizeof(addr.su.in6.sin6_addr));
-      memcpy(&dest, &addr.su.in6.sin6_addr, sizeof(dest));
-      params.preferred_address.ipv6_port = htons(addr.su.in6.sin6_port);
-      params.preferred_address.ipv6_present = 1;
+      params.preferred_addr.ipv4 = config.preferred_ipv4_addr.su.in;
+      params.preferred_addr.ipv4_present = 1;
     }
 
-    auto &token = params.preferred_address.stateless_reset_token;
+    if (config.preferred_ipv6_addr.len) {
+      params.preferred_addr.ipv6 = config.preferred_ipv6_addr.su.in6;
+      params.preferred_addr.ipv6_present = 1;
+    }
+
+    auto &token = params.preferred_addr.stateless_reset_token;
     if (util::generate_secure_random(token, sizeof(token)) != 0) {
       std::cerr << "Could not generate preferred address stateless reset token"
                 << std::endl;
       return -1;
     }
 
-    params.preferred_address.cid.datalen = NGTCP2_SV_SCIDLEN;
-    if (util::generate_secure_random(params.preferred_address.cid.data,
-                                     params.preferred_address.cid.datalen) !=
-        0) {
+    params.preferred_addr.cid.datalen = NGTCP2_SV_SCIDLEN;
+    if (util::generate_secure_random(params.preferred_addr.cid.data,
+                                     params.preferred_addr.cid.datalen) != 0) {
       std::cerr << "Could not generate preferred address connection ID"
                 << std::endl;
       return -1;
@@ -851,7 +867,7 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
 
 int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
                        const sockaddr *sa, socklen_t salen,
-                       const ngtcp2_pkt_info *pi, uint8_t *data,
+                       const ngtcp2_pkt_info *pi, const uint8_t *data,
                        size_t datalen) {
   auto path = ngtcp2_path{
       {
@@ -866,7 +882,7 @@ int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
   };
 
   if (auto rv = ngtcp2_conn_read_pkt(conn_, &path, pi, data, datalen,
-                                     util::timestamp(loop_));
+                                     util::timestamp());
       rv != 0) {
     std::cerr << "ngtcp2_conn_read_pkt: " << ngtcp2_strerror(rv) << std::endl;
     switch (rv) {
@@ -879,14 +895,13 @@ int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
       return NETWORK_ERR_DROP_CONN;
     case NGTCP2_ERR_CRYPTO:
       if (!last_error_.error_code) {
-        ngtcp2_connection_close_error_set_transport_error_tls_alert(
+        ngtcp2_ccerr_set_tls_alert(
             &last_error_, ngtcp2_conn_get_tls_alert(conn_), nullptr, 0);
       }
       break;
     default:
       if (!last_error_.error_code) {
-        ngtcp2_connection_close_error_set_transport_error_liberr(
-            &last_error_, rv, nullptr, 0);
+        ngtcp2_ccerr_set_liberr(&last_error_, rv, nullptr, 0);
       }
     }
     return handle_error();
@@ -897,7 +912,8 @@ int Handler::feed_data(const Endpoint &ep, const Address &local_addr,
 
 int Handler::on_read(const Endpoint &ep, const Address &local_addr,
                      const sockaddr *sa, socklen_t salen,
-                     const ngtcp2_pkt_info *pi, uint8_t *data, size_t datalen) {
+                     const ngtcp2_pkt_info *pi, const uint8_t *data,
+                     size_t datalen) {
   if (auto rv = feed_data(ep, local_addr, sa, salen, pi, data, datalen);
       rv != 0) {
     return rv;
@@ -909,12 +925,11 @@ int Handler::on_read(const Endpoint &ep, const Address &local_addr,
 }
 
 int Handler::handle_expiry() {
-  auto now = util::timestamp(loop_);
+  auto now = util::timestamp();
   if (auto rv = ngtcp2_conn_handle_expiry(conn_, now); rv != 0) {
     std::cerr << "ngtcp2_conn_handle_expiry: " << ngtcp2_strerror(rv)
               << std::endl;
-    ngtcp2_connection_close_error_set_transport_error_liberr(&last_error_, rv,
-                                                             nullptr, 0);
+    ngtcp2_ccerr_set_liberr(&last_error_, rv, nullptr, 0);
     return handle_error();
   }
 
@@ -922,8 +937,8 @@ int Handler::handle_expiry() {
 }
 
 int Handler::on_write() {
-  if (ngtcp2_conn_is_in_closing_period(conn_) ||
-      ngtcp2_conn_is_in_draining_period(conn_)) {
+  if (ngtcp2_conn_in_closing_period(conn_) ||
+      ngtcp2_conn_in_draining_period(conn_)) {
     return 0;
   }
 
@@ -936,6 +951,8 @@ int Handler::on_write() {
       return 0;
     }
   }
+
+  ev_io_stop(loop_, &wev_);
 
   if (auto rv = write_streams(); rv != 0) {
     return rv;
@@ -951,27 +968,19 @@ int Handler::write_streams() {
   ngtcp2_path_storage ps, prev_ps;
   uint32_t prev_ecn = 0;
   size_t pktcnt = 0;
-  auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
+  auto max_udp_payload_size = ngtcp2_conn_get_max_tx_udp_payload_size(conn_);
   auto path_max_udp_payload_size =
-      ngtcp2_conn_get_path_max_udp_payload_size(conn_);
-  size_t max_pktcnt =
-      std::min(static_cast<size_t>(64_k), ngtcp2_conn_get_send_quantum(conn_)) /
-      max_udp_payload_size;
+      ngtcp2_conn_get_path_max_tx_udp_payload_size(conn_);
+  auto max_pktcnt = ngtcp2_conn_get_send_quantum(conn_) / max_udp_payload_size;
   uint8_t *bufpos = tx_.data.get();
   ngtcp2_pkt_info pi;
   size_t gso_size = 0;
-  auto ts = util::timestamp(loop_);
+  auto ts = util::timestamp();
 
   ngtcp2_path_storage_zero(&ps);
   ngtcp2_path_storage_zero(&prev_ps);
 
-  if (config.cc_algo != NGTCP2_CC_ALGO_BBR &&
-      config.cc_algo != NGTCP2_CC_ALGO_BBR2) {
-    /* If bbr is chosen, pacing is enabled.  No need to cap the number
-       of datagrams to send. */
-    max_pktcnt =
-        std::min(max_pktcnt, static_cast<size_t>(config.max_gso_dgrams));
-  }
+  max_pktcnt = std::min(max_pktcnt, static_cast<size_t>(config.max_gso_dgrams));
 
   for (;;) {
     int64_t stream_id = -1;
@@ -1014,8 +1023,7 @@ int Handler::write_streams() {
 
       std::cerr << "ngtcp2_conn_writev_stream: " << ngtcp2_strerror(nwrite)
                 << std::endl;
-      ngtcp2_connection_close_error_set_transport_error_liberr(
-          &last_error_, nwrite, nullptr, 0);
+      ngtcp2_ccerr_set_liberr(&last_error_, nwrite, nullptr, 0);
       return handle_error();
     } else if (ndatalen >= 0) {
       stream->respbuf.pos += ndatalen;
@@ -1040,12 +1048,8 @@ int Handler::write_streams() {
                           data + nsent, datalen - nsent, gso_size);
 
           start_wev_endpoint(ep);
-          ngtcp2_conn_update_pkt_tx_time(conn_, ts);
-          return 0;
         }
       }
-
-      ev_io_stop(loop_, &wev_);
 
       // We are congestion limited.
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
@@ -1093,9 +1097,9 @@ int Handler::write_streams() {
 
           on_send_blocked(ep, ps.path.local, ps.path.remote, pi.ecn, data,
                           nwrite, 0);
-        }
 
-        start_wev_endpoint(ep);
+          start_wev_endpoint(ep);
+        }
       }
 
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
@@ -1115,9 +1119,10 @@ int Handler::write_streams() {
 
         on_send_blocked(ep, ps.path.local, ps.path.remote, pi.ecn, data + nsent,
                         datalen - nsent, gso_size);
+
+        start_wev_endpoint(ep);
       }
 
-      start_wev_endpoint(ep);
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
       return 0;
     }
@@ -1215,8 +1220,8 @@ void Handler::start_draining_period() {
 }
 
 int Handler::start_closing_period() {
-  if (!conn_ || ngtcp2_conn_is_in_closing_period(conn_) ||
-      ngtcp2_conn_is_in_draining_period(conn_)) {
+  if (!conn_ || ngtcp2_conn_in_closing_period(conn_) ||
+      ngtcp2_conn_in_draining_period(conn_)) {
     return 0;
   }
 
@@ -1241,7 +1246,7 @@ int Handler::start_closing_period() {
   ngtcp2_pkt_info pi;
   auto n = ngtcp2_conn_write_connection_close(
       conn_, &ps.path, &pi, conn_closebuf_->wpos(), conn_closebuf_->left(),
-      &last_error_, util::timestamp(loop_));
+      &last_error_, util::timestamp());
   if (n < 0) {
     std::cerr << "ngtcp2_conn_write_connection_close: " << ngtcp2_strerror(n)
               << std::endl;
@@ -1258,8 +1263,7 @@ int Handler::start_closing_period() {
 }
 
 int Handler::handle_error() {
-  if (last_error_.type ==
-      NGTCP2_CONNECTION_CLOSE_ERROR_CODE_TYPE_TRANSPORT_IDLE_CLOSE) {
+  if (last_error_.type == NGTCP2_CCERR_TYPE_IDLE_CLOSE) {
     return -1;
   }
 
@@ -1267,7 +1271,7 @@ int Handler::handle_error() {
     return -1;
   }
 
-  if (ngtcp2_conn_is_in_draining_period(conn_)) {
+  if (ngtcp2_conn_in_draining_period(conn_)) {
     return NETWORK_ERR_CLOSE_WAIT;
   }
 
@@ -1285,7 +1289,7 @@ int Handler::send_conn_close() {
 
   assert(conn_closebuf_ && conn_closebuf_->size());
   assert(conn_);
-  assert(!ngtcp2_conn_is_in_draining_period(conn_));
+  assert(!ngtcp2_conn_in_draining_period(conn_));
 
   auto path = ngtcp2_conn_get_path(conn_);
 
@@ -1296,12 +1300,13 @@ int Handler::send_conn_close() {
 
 void Handler::update_timer() {
   auto expiry = ngtcp2_conn_get_expiry(conn_);
-  auto now = util::timestamp(loop_);
+  auto now = util::timestamp();
 
   if (expiry <= now) {
     if (!config.quiet) {
       auto t = static_cast<ev_tstamp>(now - expiry) / NGTCP2_SECONDS;
-      std::cerr << "Timer has already expired: " << t << "s" << std::endl;
+      std::cerr << "Timer has already expired: " << std::fixed << t << "s"
+                << std::defaultfloat << std::endl;
     }
 
     ev_feed_event(loop_, &timer_, EV_TIMER);
@@ -1375,13 +1380,12 @@ int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
         http_parser_execute(&stream->htp, &htp_settings,
                             reinterpret_cast<const char *>(data), datalen);
     if (nread != datalen) {
-      if (auto rv = ngtcp2_conn_shutdown_stream(conn_, stream_id,
+      if (auto rv = ngtcp2_conn_shutdown_stream(conn_, 0, stream_id,
                                                 /* app error code */ 1);
           rv != 0) {
         std::cerr << "ngtcp2_conn_shutdown_stream: " << ngtcp2_strerror(rv)
                   << std::endl;
-        ngtcp2_connection_close_error_set_transport_error_liberr(
-            &last_error_, NGTCP2_ERR_INTERNAL, nullptr, 0);
+        ngtcp2_ccerr_set_liberr(&last_error_, NGTCP2_ERR_INTERNAL, nullptr, 0);
         return -1;
       }
     }
@@ -1455,7 +1459,7 @@ int Handler::on_stream_close(int64_t stream_id, uint64_t app_error_code) {
 }
 
 void Handler::shutdown_read(int64_t stream_id, int app_error_code) {
-  ngtcp2_conn_shutdown_stream_read(conn_, stream_id, app_error_code);
+  ngtcp2_conn_shutdown_stream_read(conn_, 0, stream_id, app_error_code);
 }
 
 void Handler::add_sendq(Stream *stream) { sendq_.emplace(stream); }
@@ -1712,8 +1716,7 @@ int Server::init(const char *addr, const char *port) {
 
 int Server::on_read(Endpoint &ep) {
   sockaddr_union su;
-  std::array<uint8_t, 64_k> buf;
-  ngtcp2_pkt_hd hd;
+  std::array<uint8_t, 64_k - 1> buf;
   size_t pktcnt = 0;
   ngtcp2_pkt_info pi;
 
@@ -1726,8 +1729,8 @@ int Server::on_read(Endpoint &ep) {
   msg.msg_iov = &msg_iov;
   msg.msg_iovlen = 1;
 
-  uint8_t
-      msg_ctrl[CMSG_SPACE(sizeof(uint8_t)) + CMSG_SPACE(sizeof(in6_pktinfo))];
+  uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(in6_pktinfo)) +
+                   CMSG_SPACE(sizeof(uint16_t))];
   msg.msg_control = msg_ctrl;
 
   for (; pktcnt < 10;) {
@@ -1742,206 +1745,216 @@ int Server::on_read(Endpoint &ep) {
       return 0;
     }
 
-    ++pktcnt;
-
     pi.ecn = msghdr_get_ecn(&msg, su.storage.ss_family);
     auto local_addr = msghdr_get_local_addr(&msg, su.storage.ss_family);
     if (!local_addr) {
+      ++pktcnt;
       std::cerr << "Unable to obtain local address" << std::endl;
       continue;
     }
 
+    auto gso_size = msghdr_get_udp_gro(&msg);
+    if (gso_size == 0) {
+      gso_size = static_cast<size_t>(nread);
+    }
+
     set_port(*local_addr, ep.addr);
 
-    if (!config.quiet) {
-      std::array<char, IF_NAMESIZE> ifname;
-      std::cerr << "Received packet: local="
-                << util::straddr(&local_addr->su.sa, local_addr->len)
-                << " remote=" << util::straddr(&su.sa, msg.msg_namelen)
-                << " if=" << if_indextoname(local_addr->ifindex, ifname.data())
-                << " ecn=0x" << std::hex << pi.ecn << std::dec << " " << nread
-                << " bytes" << std::endl;
-    }
+    auto data = buf.data();
 
-    if (debug::packet_lost(config.rx_loss_prob)) {
+    for (;;) {
+      auto datalen = std::min(static_cast<size_t>(nread), gso_size);
+
+      ++pktcnt;
+
       if (!config.quiet) {
-        std::cerr << "** Simulated incoming packet loss **" << std::endl;
+        std::array<char, IF_NAMESIZE> ifname;
+        std::cerr << "Received packet: local="
+                  << util::straddr(&local_addr->su.sa, local_addr->len)
+                  << " remote=" << util::straddr(&su.sa, msg.msg_namelen)
+                  << " if="
+                  << if_indextoname(local_addr->ifindex, ifname.data())
+                  << " ecn=0x" << std::hex << static_cast<uint32_t>(pi.ecn)
+                  << std::dec << " " << datalen << " bytes" << std::endl;
       }
-      continue;
-    }
 
-    if (nread == 0) {
-      continue;
-    }
-
-    uint32_t version;
-    const uint8_t *dcid, *scid;
-    size_t dcidlen, scidlen;
-
-    switch (auto rv = ngtcp2_pkt_decode_version_cid(&version, &dcid, &dcidlen,
-                                                    &scid, &scidlen, buf.data(),
-                                                    nread, NGTCP2_SV_SCIDLEN);
-            rv) {
-    case 0:
-      break;
-    case NGTCP2_ERR_VERSION_NEGOTIATION:
-      send_version_negotiation(version, scid, scidlen, dcid, dcidlen, ep,
-                               *local_addr, &su.sa, msg.msg_namelen);
-      continue;
-    default:
-      std::cerr << "Could not decode version and CID from QUIC packet header: "
-                << ngtcp2_strerror(rv) << std::endl;
-      continue;
-    }
-
-    auto dcid_key = util::make_cid_key(dcid, dcidlen);
-
-    auto handler_it = handlers_.find(dcid_key);
-    if (handler_it == std::end(handlers_)) {
-      switch (auto rv = ngtcp2_accept(&hd, buf.data(), nread); rv) {
-      case 0:
-        break;
-      case NGTCP2_ERR_RETRY:
-        send_retry(&hd, ep, *local_addr, &su.sa, msg.msg_namelen, nread * 3);
-        continue;
-      default:
+      if (debug::packet_lost(config.rx_loss_prob)) {
         if (!config.quiet) {
-          std::cerr << "Unexpected packet received: length=" << nread
-                    << std::endl;
+          std::cerr << "** Simulated incoming packet loss **" << std::endl;
         }
-        continue;
+      } else {
+        read_pkt(ep, *local_addr, &su.sa, msg.msg_namelen, &pi, data, datalen);
       }
 
-      ngtcp2_cid ocid;
-      ngtcp2_cid *pocid = nullptr;
-
-      assert(hd.type == NGTCP2_PKT_INITIAL);
-
-      if (config.validate_addr || hd.token.len) {
-        std::cerr << "Perform stateless address validation" << std::endl;
-        if (hd.token.len == 0) {
-          send_retry(&hd, ep, *local_addr, &su.sa, msg.msg_namelen, nread * 3);
-          continue;
-        }
-
-        if (hd.token.base[0] != NGTCP2_CRYPTO_TOKEN_MAGIC_RETRY &&
-            hd.dcid.datalen < NGTCP2_MIN_INITIAL_DCIDLEN) {
-          send_stateless_connection_close(&hd, ep, *local_addr, &su.sa,
-                                          msg.msg_namelen);
-          continue;
-        }
-
-        switch (hd.token.base[0]) {
-        case NGTCP2_CRYPTO_TOKEN_MAGIC_RETRY:
-          if (verify_retry_token(&ocid, &hd, &su.sa, msg.msg_namelen) != 0) {
-            send_stateless_connection_close(&hd, ep, *local_addr, &su.sa,
-                                            msg.msg_namelen);
-            continue;
-          }
-          pocid = &ocid;
-          break;
-        case NGTCP2_CRYPTO_TOKEN_MAGIC_REGULAR:
-          if (verify_token(&hd, &su.sa, msg.msg_namelen) != 0) {
-            if (config.validate_addr) {
-              send_retry(&hd, ep, *local_addr, &su.sa, msg.msg_namelen,
-                         nread * 3);
-              continue;
-            }
-
-            hd.token.base = nullptr;
-            hd.token.len = 0;
-          }
-          break;
-        default:
-          if (!config.quiet) {
-            std::cerr << "Ignore unrecognized token" << std::endl;
-          }
-          if (config.validate_addr) {
-            send_retry(&hd, ep, *local_addr, &su.sa, msg.msg_namelen,
-                       nread * 3);
-            continue;
-          }
-
-          hd.token.base = nullptr;
-          hd.token.len = 0;
-          break;
-        }
-      }
-
-      auto h = std::make_unique<Handler>(loop_, this);
-      if (h->init(ep, *local_addr, &su.sa, msg.msg_namelen, &hd.scid, &hd.dcid,
-                  pocid, hd.token.base, hd.token.len, hd.version,
-                  tls_ctx_) != 0) {
-        continue;
-      }
-
-      switch (h->on_read(ep, *local_addr, &su.sa, msg.msg_namelen, &pi,
-                         buf.data(), nread)) {
-      case 0:
+      nread -= datalen;
+      if (nread == 0) {
         break;
-      case NETWORK_ERR_RETRY:
-        send_retry(&hd, ep, *local_addr, &su.sa, msg.msg_namelen, nread * 3);
-        continue;
-      default:
-        continue;
       }
 
-      switch (h->on_write()) {
-      case 0:
-        break;
-      default:
-        continue;
-      }
-
-      std::array<ngtcp2_cid, 2> scids;
-      auto conn = h->conn();
-
-      auto num_scid = ngtcp2_conn_get_num_scid(conn);
-
-      assert(num_scid <= scids.size());
-
-      ngtcp2_conn_get_scid(conn, scids.data());
-
-      for (size_t i = 0; i < num_scid; ++i) {
-        handlers_.emplace(util::make_cid_key(&scids[i]), h.get());
-      }
-
-      handlers_.emplace(dcid_key, h.get());
-
-      h.release();
-
-      continue;
+      data += datalen;
     }
-
-    auto h = (*handler_it).second;
-    auto conn = h->conn();
-    if (ngtcp2_conn_is_in_closing_period(conn)) {
-      // TODO do exponential backoff.
-      switch (h->send_conn_close()) {
-      case 0:
-        break;
-      default:
-        remove(h);
-      }
-      continue;
-    }
-    if (ngtcp2_conn_is_in_draining_period(conn)) {
-      continue;
-    }
-
-    if (auto rv = h->on_read(ep, *local_addr, &su.sa, msg.msg_namelen, &pi,
-                             buf.data(), nread);
-        rv != 0) {
-      if (rv != NETWORK_ERR_CLOSE_WAIT) {
-        remove(h);
-      }
-      continue;
-    }
-
-    h->signal_write();
   }
 
   return 0;
+}
+
+void Server::read_pkt(Endpoint &ep, const Address &local_addr,
+                      const sockaddr *sa, socklen_t salen,
+                      const ngtcp2_pkt_info *pi, const uint8_t *data,
+                      size_t datalen) {
+  if (datalen == 0) {
+    return;
+  }
+
+  ngtcp2_version_cid vc;
+
+  switch (auto rv = ngtcp2_pkt_decode_version_cid(&vc, data, datalen,
+                                                  NGTCP2_SV_SCIDLEN);
+          rv) {
+  case 0:
+    break;
+  case NGTCP2_ERR_VERSION_NEGOTIATION:
+    send_version_negotiation(vc.version, vc.scid, vc.scidlen, vc.dcid,
+                             vc.dcidlen, ep, local_addr, sa, salen);
+    return;
+  default:
+    std::cerr << "Could not decode version and CID from QUIC packet header: "
+              << ngtcp2_strerror(rv) << std::endl;
+    return;
+  }
+
+  auto dcid_key = util::make_cid_key(vc.dcid, vc.dcidlen);
+
+  auto handler_it = handlers_.find(dcid_key);
+  if (handler_it == std::end(handlers_)) {
+    ngtcp2_pkt_hd hd;
+
+    if (auto rv = ngtcp2_accept(&hd, data, datalen); rv != 0) {
+      if (!config.quiet) {
+        std::cerr << "Unexpected packet received: length=" << datalen
+                  << std::endl;
+      }
+      return;
+    }
+
+    ngtcp2_cid ocid;
+    ngtcp2_cid *pocid = nullptr;
+    ngtcp2_token_type token_type = NGTCP2_TOKEN_TYPE_UNKNOWN;
+
+    assert(hd.type == NGTCP2_PKT_INITIAL);
+
+    if (config.validate_addr || hd.tokenlen) {
+      std::cerr << "Perform stateless address validation" << std::endl;
+      if (hd.tokenlen == 0) {
+        send_retry(&hd, ep, local_addr, sa, salen, datalen * 3);
+        return;
+      }
+
+      if (hd.token[0] != NGTCP2_CRYPTO_TOKEN_MAGIC_RETRY &&
+          hd.dcid.datalen < NGTCP2_MIN_INITIAL_DCIDLEN) {
+        send_stateless_connection_close(&hd, ep, local_addr, sa, salen);
+        return;
+      }
+
+      switch (hd.token[0]) {
+      case NGTCP2_CRYPTO_TOKEN_MAGIC_RETRY:
+        if (verify_retry_token(&ocid, &hd, sa, salen) != 0) {
+          send_stateless_connection_close(&hd, ep, local_addr, sa, salen);
+          return;
+        }
+        pocid = &ocid;
+
+        token_type = NGTCP2_TOKEN_TYPE_RETRY;
+
+        break;
+      case NGTCP2_CRYPTO_TOKEN_MAGIC_REGULAR:
+        if (verify_token(&hd, sa, salen) != 0) {
+          if (config.validate_addr) {
+            send_retry(&hd, ep, local_addr, sa, salen, datalen * 3);
+            return;
+          }
+
+          hd.token = nullptr;
+          hd.tokenlen = 0;
+        } else {
+          token_type = NGTCP2_TOKEN_TYPE_NEW_TOKEN;
+        }
+        break;
+      default:
+        if (!config.quiet) {
+          std::cerr << "Ignore unrecognized token" << std::endl;
+        }
+        if (config.validate_addr) {
+          send_retry(&hd, ep, local_addr, sa, salen, datalen * 3);
+          return;
+        }
+
+        hd.token = nullptr;
+        hd.tokenlen = 0;
+        break;
+      }
+    }
+
+    auto h = std::make_unique<Handler>(loop_, this);
+    if (h->init(ep, local_addr, sa, salen, &hd.scid, &hd.dcid, pocid, hd.token,
+                hd.tokenlen, token_type, hd.version, tls_ctx_) != 0) {
+      return;
+    }
+
+    switch (h->on_read(ep, local_addr, sa, salen, pi, data, datalen)) {
+    case 0:
+      break;
+    case NETWORK_ERR_RETRY:
+      send_retry(&hd, ep, local_addr, sa, salen, datalen * 3);
+      return;
+    default:
+      return;
+    }
+
+    if (h->on_write() != 0) {
+      return;
+    }
+
+    std::array<ngtcp2_cid, 8> scids;
+    auto conn = h->conn();
+
+    auto num_scid = ngtcp2_conn_get_scid(conn, nullptr);
+
+    assert(num_scid <= scids.size());
+
+    ngtcp2_conn_get_scid(conn, scids.data());
+
+    for (size_t i = 0; i < num_scid; ++i) {
+      associate_cid(&scids[i], h.get());
+    }
+
+    handlers_.emplace(dcid_key, h.release());
+
+    return;
+  }
+
+  auto h = (*handler_it).second;
+  auto conn = h->conn();
+  if (ngtcp2_conn_in_closing_period(conn)) {
+    // TODO do exponential backoff.
+    if (h->send_conn_close() != 0) {
+      remove(h);
+    }
+    return;
+  }
+  if (ngtcp2_conn_in_draining_period(conn)) {
+    return;
+  }
+
+  if (auto rv = h->on_read(ep, local_addr, sa, salen, pi, data, datalen);
+      rv != 0) {
+    if (rv != NETWORK_ERR_CLOSE_WAIT) {
+      remove(h);
+    }
+    return;
+  }
+
+  h->signal_write();
 }
 
 namespace {
@@ -1988,9 +2001,7 @@ int Server::send_version_negotiation(uint32_t version, const uint8_t *dcid,
   }
 
   auto nwrite = ngtcp2_pkt_write_version_negotiation(
-      buf.wpos(), buf.left(),
-      std::uniform_int_distribution<uint8_t>(
-          0, std::numeric_limits<uint8_t>::max())(randgen),
+      buf.wpos(), buf.left(), std::uniform_int_distribution<uint8_t>()(randgen),
       dcid, dcidlen, scid, scidlen, sv.data(), p - std::begin(sv));
   if (nwrite < 0) {
     std::cerr << "ngtcp2_pkt_write_version_negotiation: "
@@ -2139,7 +2150,7 @@ int Server::verify_retry_token(ngtcp2_cid *ocid, const ngtcp2_pkt_hd *hd,
   if (!config.quiet) {
     std::cerr << "Verifying Retry token from [" << host.data()
               << "]:" << port.data() << std::endl;
-    util::hexdump(stderr, hd->token.base, hd->token.len);
+    util::hexdump(stderr, hd->token, hd->tokenlen);
   }
 
   auto t = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2147,7 +2158,7 @@ int Server::verify_retry_token(ngtcp2_cid *ocid, const ngtcp2_pkt_hd *hd,
                .count();
 
   if (ngtcp2_crypto_verify_retry_token(
-          ocid, hd->token.base, hd->token.len, config.static_secret.data(),
+          ocid, hd->token, hd->tokenlen, config.static_secret.data(),
           config.static_secret.size(), hd->version, sa, salen, &hd->dcid,
           10 * NGTCP2_SECONDS, t) != 0) {
     std::cerr << "Could not verify Retry token" << std::endl;
@@ -2177,14 +2188,14 @@ int Server::verify_token(const ngtcp2_pkt_hd *hd, const sockaddr *sa,
   if (!config.quiet) {
     std::cerr << "Verifying token from [" << host.data() << "]:" << port.data()
               << std::endl;
-    util::hexdump(stderr, hd->token.base, hd->token.len);
+    util::hexdump(stderr, hd->token, hd->tokenlen);
   }
 
   auto t = std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::system_clock::now().time_since_epoch())
                .count();
 
-  if (ngtcp2_crypto_verify_regular_token(hd->token.base, hd->token.len,
+  if (ngtcp2_crypto_verify_regular_token(hd->token, hd->tokenlen,
                                          config.static_secret.data(),
                                          config.static_secret.size(), sa, salen,
                                          3600 * NGTCP2_SECONDS, t) != 0) {
@@ -2251,8 +2262,8 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
   msg.msg_iov = &msg_iov;
   msg.msg_iovlen = 1;
 
-  uint8_t
-      msg_ctrl[CMSG_SPACE(sizeof(uint16_t)) + CMSG_SPACE(sizeof(in6_pktinfo))];
+  uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(uint16_t)) +
+                   CMSG_SPACE(sizeof(in6_pktinfo))];
 
   memset(msg_ctrl, 0, sizeof(msg_ctrl));
 
@@ -2269,10 +2280,11 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     cm->cmsg_level = IPPROTO_IP;
     cm->cmsg_type = IP_PKTINFO;
     cm->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
-    auto pktinfo = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cm));
-    memset(pktinfo, 0, sizeof(in_pktinfo));
+    in_pktinfo pktinfo{};
     auto addrin = reinterpret_cast<sockaddr_in *>(local_addr.addr);
-    pktinfo->ipi_spec_dst = addrin->sin_addr;
+    pktinfo.ipi_spec_dst = addrin->sin_addr;
+    memcpy(CMSG_DATA(cm), &pktinfo, sizeof(pktinfo));
+
     break;
   }
   case AF_INET6: {
@@ -2280,10 +2292,11 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     cm->cmsg_level = IPPROTO_IPV6;
     cm->cmsg_type = IPV6_PKTINFO;
     cm->cmsg_len = CMSG_LEN(sizeof(in6_pktinfo));
-    auto pktinfo = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cm));
-    memset(pktinfo, 0, sizeof(in6_pktinfo));
+    in6_pktinfo pktinfo{};
     auto addrin = reinterpret_cast<sockaddr_in6 *>(local_addr.addr);
-    pktinfo->ipi6_addr = addrin->sin6_addr;
+    pktinfo.ipi6_addr = addrin->sin6_addr;
+    memcpy(CMSG_DATA(cm), &pktinfo, sizeof(pktinfo));
+
     break;
   }
   default:
@@ -2297,16 +2310,32 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     cm->cmsg_level = SOL_UDP;
     cm->cmsg_type = UDP_SEGMENT;
     cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
-    *(reinterpret_cast<uint16_t *>(CMSG_DATA(cm))) = gso_size;
+    uint16_t n = gso_size;
+    memcpy(CMSG_DATA(cm), &n, sizeof(n));
   }
 #endif // UDP_SEGMENT
 
-  msg.msg_controllen = controllen;
+  controllen += CMSG_SPACE(sizeof(int));
+  cm = CMSG_NXTHDR(&msg, cm);
+  cm->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cm), &ecn, sizeof(ecn));
 
-  if (ep.ecn != ecn) {
-    ep.ecn = ecn;
-    fd_set_ecn(ep.fd, ep.addr.su.storage.ss_family, ecn);
+  switch (local_addr.addr->sa_family) {
+  case AF_INET:
+    cm->cmsg_level = IPPROTO_IP;
+    cm->cmsg_type = IP_TOS;
+
+    break;
+  case AF_INET6:
+    cm->cmsg_level = IPPROTO_IPV6;
+    cm->cmsg_type = IPV6_TCLASS;
+
+    break;
+  default:
+    assert(0);
   }
+
+  msg.msg_controllen = controllen;
 
   ssize_t nwrite = 0;
 
@@ -2366,14 +2395,13 @@ void Server::dissociate_cid(const ngtcp2_cid *cid) {
 void Server::remove(const Handler *h) {
   auto conn = h->conn();
 
-  handlers_.erase(
-      util::make_cid_key(ngtcp2_conn_get_client_initial_dcid(conn)));
+  dissociate_cid(ngtcp2_conn_get_client_initial_dcid(conn));
 
-  std::vector<ngtcp2_cid> cids(ngtcp2_conn_get_num_scid(conn));
+  std::vector<ngtcp2_cid> cids(ngtcp2_conn_get_scid(conn, nullptr));
   ngtcp2_conn_get_scid(conn, cids.data());
 
   for (auto &cid : cids) {
-    handlers_.erase(util::make_cid_key(&cid));
+    dissociate_cid(&cid);
   }
 
   delete h;
@@ -2435,8 +2463,13 @@ int parse_host_port(Address &dest, int af, const char *first,
 } // namespace
 
 namespace {
+const char *prog = "h09server";
+} // namespace
+
+namespace {
 void print_usage() {
-  std::cerr << "Usage: server [OPTIONS] <ADDR> <PORT> <PRIVATE_KEY_FILE> "
+  std::cerr << "Usage: " << prog
+            << " [OPTIONS] <ADDR> <PORT> <PRIVATE_KEY_FILE> "
                "<CERTIFICATE_FILE>"
             << std::endl;
 }
@@ -2456,19 +2489,22 @@ void config_set_default(Config &config) {
     config.htdocs = path;
     free(path);
   }
-  config.mime_types_file = "/etc/mime.types";
+  config.mime_types_file = "/etc/mime.types"sv;
   config.max_data = 1_m;
   config.max_stream_data_bidi_local = 256_k;
   config.max_stream_data_bidi_remote = 256_k;
   config.max_stream_data_uni = 256_k;
+  config.max_window = 6_m;
+  config.max_stream_window = 6_m;
   config.max_streams_bidi = 100;
   config.max_streams_uni = 3;
   config.max_dyn_length = 20_m;
   config.cc_algo = NGTCP2_CC_ALGO_CUBIC;
   config.initial_rtt = NGTCP2_DEFAULT_INITIAL_RTT;
-  config.max_gso_dgrams = 10;
-  config.handshake_timeout = NGTCP2_DEFAULT_HANDSHAKE_TIMEOUT;
+  config.max_gso_dgrams = 64;
+  config.handshake_timeout = UINT64_MAX;
   config.ack_thresh = 2;
+  config.initial_pkt_num = UINT32_MAX;
 }
 } // namespace
 
@@ -2572,7 +2608,7 @@ Options:
               The maximum length of a dynamically generated content.
               Default: )"
             << util::format_uint_iec(config.max_dyn_length) << R"(
-  --cc=(cubic|reno|bbr|bbr2)
+  --cc=(cubic|reno|bbr)
               The name of congestion controller algorithm.
               Default: )"
             << util::strccalgo(config.cc_algo) << R"(
@@ -2582,6 +2618,18 @@ Options:
             << util::format_duration(config.initial_rtt) << R"(
   --max-udp-payload-size=<SIZE>
               Override maximum UDP payload size that server transmits.
+  --max-window=<SIZE>
+              Maximum connection-level flow  control window size.  The
+              window auto-tuning is enabled if nonzero value is given,
+              and window size is scaled up to this value.
+              Default: )"
+            << util::format_uint_iec(config.max_window) << R"(
+  --max-stream-window=<SIZE>
+              Maximum stream-level flow control window size.  The
+              window auto-tuning is enabled if nonzero value is given,
+              and window size is scaled up to this value.
+              Default: )"
+            << util::format_uint_iec(config.max_stream_window) << R"(
   --send-trailers
               Send trailer fields.
   --max-gso-dgrams=<N>
@@ -2590,30 +2638,35 @@ Options:
               Default: )"
             << config.max_gso_dgrams << R"(
   --handshake-timeout=<DURATION>
-              Set the QUIC handshake timeout.
-              Default: )"
-            << util::format_duration(config.handshake_timeout) << R"(
+              Set  the  QUIC handshake  timeout.   It  defaults to  no
+              timeout.
   --preferred-versions=<HEX>[[,<HEX>]...]
               Specify  QUIC versions  in hex  string in  the order  of
               preference.  Server negotiates one  of those versions if
               client  initially  selects  a  less  preferred  version.
               These versions must be  supported by libngtcp2.  Instead
               of  specifying hex  string,  there  are special  aliases
-              available:  "v1"   indicates  QUIC  v1,   and  "v2draft"
-              indicates QUIC v2 draft.
-  --other-versions=<HEX>[[,<HEX>]...]
+              available: "v1"  indicates QUIC  v1, and  "v2" indicates
+              QUIC v2.
+  --available-versions=<HEX>[[,<HEX>]...]
               Specify QUIC  versions in  hex string  that are  sent in
-              other_versions  field  of version_information  transport
-              parameter.  This list can include a version which is not
-              supported  by  libngtcp2.   Instead  of  specifying  hex
-              string,  there  are   special  aliases  available:  "v1"
-              indicates  QUIC  v1,  and "v2draft"  indicates  QUIC  v2
-              draft.
+              available_versions    field    of    version_information
+              transport parameter.   This list  can include  a version
+              which  is  not  supported   by  libngtcp2.   Instead  of
+              specifying  hex   string,  there  are   special  aliases
+              available: "v1"  indicates QUIC  v1, and  "v2" indicates
+              QUIC v2.
   --no-pmtud  Disables Path MTU Discovery.
   --ack-thresh=<N>
-              Override   ACK  threshold,   aka,   maximum  number   of
-              unacknowledged   packets    before   sending    an   ACK
-              immediately.
+              The minimum number of the received ACK eliciting packets
+              that triggers immediate acknowledgement.
+              Default: )"
+            << config.ack_thresh << R"(
+  --initial-pkt-num=<N>
+              The initial packet  number that is used  for each packet
+              number space.  It  must be in range [0, (1  << 31) - 1],
+              inclusive.   By default,  the initial  packet number  is
+              chosen randomly.
   -h, --help  Display this help and exit.
 
 ---
@@ -2637,6 +2690,10 @@ std::ofstream keylog_file;
 
 int main(int argc, char **argv) {
   config_set_default(config);
+
+  if (argc) {
+    prog = basename(argv[0]);
+  }
 
   for (;;) {
     static int flag = 0;
@@ -2670,12 +2727,15 @@ int main(int argc, char **argv) {
         {"initial-rtt", required_argument, &flag, 20},
         {"max-udp-payload-size", required_argument, &flag, 21},
         {"send-trailers", no_argument, &flag, 22},
+        {"max-window", required_argument, &flag, 23},
+        {"max-stream-window", required_argument, &flag, 24},
         {"max-gso-dgrams", required_argument, &flag, 25},
         {"handshake-timeout", required_argument, &flag, 26},
         {"preferred-versions", required_argument, &flag, 27},
-        {"other-versions", required_argument, &flag, 28},
+        {"available-versions", required_argument, &flag, 28},
         {"no-pmtud", no_argument, &flag, 29},
         {"ack-thresh", required_argument, &flag, 30},
+        {"initial-pkt-num", required_argument, &flag, 31},
         {nullptr, 0, nullptr, 0}};
 
     auto optidx = 0;
@@ -2862,11 +2922,7 @@ int main(int argc, char **argv) {
           config.cc_algo = NGTCP2_CC_ALGO_BBR;
           break;
         }
-        if (strcmp("bbr2", optarg) == 0) {
-          config.cc_algo = NGTCP2_CC_ALGO_BBR2;
-          break;
-        }
-        std::cerr << "cc: specify cubic, reno, bbr, or bbr2" << std::endl;
+        std::cerr << "cc: specify cubic, reno, or bbr" << std::endl;
         exit(EXIT_FAILURE);
       case 20:
         // --initial-rtt
@@ -2893,6 +2949,24 @@ int main(int argc, char **argv) {
       case 22:
         // --send-trailers
         config.send_trailers = true;
+        break;
+      case 23:
+        // --max-window
+        if (auto n = util::parse_uint_iec(optarg); !n) {
+          std::cerr << "max-window: invalid argument" << std::endl;
+          exit(EXIT_FAILURE);
+        } else {
+          config.max_window = *n;
+        }
+        break;
+      case 24:
+        // --max-stream-window
+        if (auto n = util::parse_uint_iec(optarg); !n) {
+          std::cerr << "max-stream-window: invalid argument" << std::endl;
+          exit(EXIT_FAILURE);
+        } else {
+          config.max_stream_window = *n;
+        }
         break;
       case 25:
         // --max-gso-dgrams
@@ -2922,12 +2996,12 @@ int main(int argc, char **argv) {
         config.preferred_versions.resize(l.size());
         auto it = std::begin(config.preferred_versions);
         for (const auto &k : l) {
-          if (k == "v1") {
+          if (k == "v1"sv) {
             *it++ = NGTCP2_PROTO_VER_V1;
             continue;
           }
-          if (k == "v2draft") {
-            *it++ = NGTCP2_PROTO_VER_V2_DRAFT;
+          if (k == "v2"sv) {
+            *it++ = NGTCP2_PROTO_VER_V2;
             continue;
           }
           auto rv = util::parse_version(k);
@@ -2946,23 +3020,23 @@ int main(int argc, char **argv) {
         break;
       }
       case 28: {
-        // --other-versions
+        // --available-versions
         auto l = util::split_str(optarg);
-        config.other_versions.resize(l.size());
-        auto it = std::begin(config.other_versions);
+        config.available_versions.resize(l.size());
+        auto it = std::begin(config.available_versions);
         for (const auto &k : l) {
-          if (k == "v1") {
+          if (k == "v1"sv) {
             *it++ = NGTCP2_PROTO_VER_V1;
             continue;
           }
-          if (k == "v2draft") {
-            *it++ = NGTCP2_PROTO_VER_V2_DRAFT;
+          if (k == "v2"sv) {
+            *it++ = NGTCP2_PROTO_VER_V2;
             continue;
           }
           auto rv = util::parse_version(k);
           if (!rv) {
-            std::cerr << "other-versions: invalid version " << std::quoted(k)
-                      << std::endl;
+            std::cerr << "available-versions: invalid version "
+                      << std::quoted(k) << std::endl;
             exit(EXIT_FAILURE);
           }
           *it++ = *rv;
@@ -2975,7 +3049,7 @@ int main(int argc, char **argv) {
         break;
       case 30:
         // --ack-thresh
-        if (auto n = util::parse_uint_iec(optarg); !n) {
+        if (auto n = util::parse_uint(optarg); !n) {
           std::cerr << "ack-thresh: invalid argument" << std::endl;
           exit(EXIT_FAILURE);
         } else if (*n > 100) {
@@ -2983,6 +3057,19 @@ int main(int argc, char **argv) {
           exit(EXIT_FAILURE);
         } else {
           config.ack_thresh = *n;
+        }
+        break;
+      case 31:
+        // --initial-pkt-num
+        if (auto n = util::parse_uint(optarg); !n) {
+          std::cerr << "initial-pkt-num: invalid argument" << std::endl;
+          exit(EXIT_FAILURE);
+        } else if (*n > INT32_MAX) {
+          std::cerr << "initial-pkt-num: must not exceed (1 << 31) - 1"
+                    << std::endl;
+          exit(EXIT_FAILURE);
+        } else {
+          config.initial_pkt_num = static_cast<uint32_t>(*n);
         }
         break;
       }
