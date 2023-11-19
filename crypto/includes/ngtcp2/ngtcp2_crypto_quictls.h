@@ -140,6 +140,18 @@ ngtcp2_crypto_quictls_configure_client_context(SSL_CTX *ssl_ctx);
  */
 NGTCP2_EXTERN int ngtcp2_crypto_quictls_init(void);
 
+/**
+  * @function
+  *
+  * `ngtcp2_crypto_quictls_get_errors` retrieves errors from the
+  * OpenSSL error queue and calls the callback until there are no more
+  * errors.
+  */
+NGTCP2_EXTERN void
+ngtcp2_crypto_quictls_get_errors(void (*cb)(unsigned long code,
+                                 const char *str, void *user_data),
+				 void *user_data);
+
 #ifdef __cplusplus
 }
 #endif
