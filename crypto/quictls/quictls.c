@@ -35,6 +35,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
+#include <openssl/err.h>
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #  include <openssl/core_names.h>
@@ -1011,4 +1012,14 @@ int ngtcp2_crypto_quictls_configure_client_context(SSL_CTX *ssl_ctx) {
   crypto_quictls_configure_context(ssl_ctx);
 
   return 0;
+}
+
+void ngtcp2_crypto_quictls_get_errors(void (*cb)(unsigned long code,
+                                      const char *str, void *user_data),
+                                      void *user_data) {
+  char buf[256];
+  for (unsigned long code; code = ERR_get_error(), code != 0;) {
+    ERR_error_string_n(code, buf, sizeof(buf));
+    cb(code, buf, user_data);
+  }
 }
